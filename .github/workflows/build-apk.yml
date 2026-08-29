@@ -33,12 +33,15 @@ jobs:
       - name: Check Gradle
         run: gradle --version
 
+      - name: Verify Firebase configuration
+        run: test -f app/google-services.json
+
       - name: Build Debug APK
         run: gradle assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: StaffPayroll-debug-apk
+          name: StaffPayroll-milestone2-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
