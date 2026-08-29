@@ -1,22 +1,19 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.gms.google-services")
 }
 
 android {
-    namespace = "com.nitin.staffpayroll"
-
+    namespace = "com.speqta.staffpayroll"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.nitin.staffpayroll"
-
+        applicationId = "com.speqta.staffpayroll"
         minSdk = 24
         targetSdk = 37
-
-        versionCode = 1
-        versionName = "0.1.0"
-
+        versionCode = 2
+        versionName = "0.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -24,15 +21,12 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
         }
-
         debug {
-            applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
         }
     }
@@ -54,47 +48,24 @@ android {
 }
 
 dependencies {
-
-    val composeBom =
-        platform("androidx.compose:compose-bom:2026.08.00")
-
+    val composeBom = platform("androidx.compose:compose-bom:2026.08.00")
     implementation(composeBom)
-
     androidTestImplementation(composeBom)
 
     implementation("androidx.core:core-ktx:1.19.0")
-
     implementation("androidx.activity:activity-compose:1.13.0")
-
     implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    debugImplementation("androidx.compose.ui:ui-tooling")
 
-    implementation(
-        "androidx.compose.ui:ui-tooling-preview"
-    )
-
-    implementation(
-        "androidx.compose.material3:material3"
-    )
-
-    debugImplementation(
-        "androidx.compose.ui:ui-tooling"
-    )
+    implementation(platform("com.google.firebase:firebase-bom:34.18.0"))
+    implementation("com.google.firebase:firebase-auth")
+    implementation("com.google.firebase:firebase-firestore")
 
     testImplementation("junit:junit:4.13.2")
-
-    androidTestImplementation(
-        "androidx.test.ext:junit:1.3.0"
-    )
-
-    androidTestImplementation(
-        "androidx.test.espresso:espresso-core:3.7.0"
-    )
-
-    androidTestImplementation(
-        "androidx.compose.ui:ui-test-junit4"
-    )
-
-    debugImplementation(
-        "androidx.compose.ui:ui-test-manifest"
-    )
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

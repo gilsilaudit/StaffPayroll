@@ -1,2 +1,1 @@
-# Milestone 1
-# No custom ProGuard/R8 rules are required yet.
+# No custom R8 rules required for Milestone 2.

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "792979163910",
+    "project_id": "staffpayroll-f369c",
+    "storage_bucket": "staffpayroll-f369c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:792979163910:android:e68089b808c8fd34c0ac87",
+        "android_client_info": {
+          "package_name": "com.speqta.staffpayroll"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBqJCHgHDT-SNwilPWWyvECqHiDm5MNxo8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
