@@ -266,11 +266,15 @@ private fun RoleResolutionScreen(
         error = ""
         access = null
 
-        user.getIdTokenResult(true)
+        user.getIdToken(true)
             .addOnCompleteListener { task ->
                 loading = false
                 if (task.isSuccessful) {
-                    access = accessFromToken(task.result)
+                    task.result?.let { token ->
+                        access = accessFromToken(token)
+                    } ?: run {
+                        error = "Unable to verify your access. Please sign in again."
+                    }
                 } else {
                     error = "Unable to verify your access. Please sign in again."
                 }
