@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- White-label branding: change these resources for a client-branded build. -->
+    <string name="brand_app_name">Staff Payroll</string>
+    <color name="launcher_background">#FFFFFF</color>
+</resources>
