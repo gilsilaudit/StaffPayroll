@@ -1,0 +1,62 @@
+name: Set Super Admin
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  set-super-admin:
+    name: Set Super Admin Claim
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Firebase Admin SDK
+        run: npm install firebase-admin
+
+      - name: Set Super Admin claim
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          node <<'NODE'
+          const admin = require("firebase-admin");
+
+          const serviceAccount = JSON.parse(
+            process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+          );
+
+          admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+          });
+
+          async function main() {
+            const email = "nits@icai.org";
+
+            const user = await admin.auth().getUserByEmail(email);
+
+            const existingClaims = user.customClaims || {};
+
+            await admin.auth().setCustomUserClaims(user.uid, {
+              ...existingClaims,
+              role: "SUPER_ADMIN"
+            });
+
+            console.log(`SUPER_ADMIN claim set successfully for ${email}`);
+            console.log(`User UID: ${user.uid}`);
+          }
+
+          main().catch((error) => {
+            console.error("Failed to set SUPER_ADMIN claim.");
+            console.error(error.message);
+            process.exit(1);
+          });
+          NODE
