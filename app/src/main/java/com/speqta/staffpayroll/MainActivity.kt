@@ -31,14 +31,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.input.KeyboardOptions
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GetTokenResult
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
@@ -63,6 +62,7 @@ private data class TenantRecord(
 )
 
 class MainActivity : ComponentActivity() {
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -89,17 +89,28 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun M3AuthenticationScreen(firebaseReady: Boolean) {
+
     if (!firebaseReady) {
         FirebaseConfigurationError()
         return
     }
 
-    val auth = remember { FirebaseAuth.getInstance() }
-    var currentUser by remember { mutableStateOf(auth.currentUser) }
+    val auth = remember {
+        FirebaseAuth.getInstance()
+    }
+
+    var currentUser by remember {
+        mutableStateOf(auth.currentUser)
+    }
 
     if (currentUser == null) {
-        LoginScreen(auth) { currentUser = auth.currentUser }
+
+        LoginScreen(auth) {
+            currentUser = auth.currentUser
+        }
+
     } else {
+
         RoleResolutionScreen(
             user = currentUser!!,
             onSignOut = {
@@ -115,11 +126,26 @@ private fun LoginScreen(
     auth: FirebaseAuth,
     onSignedIn: () -> Unit
 ) {
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var message by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var resetBusy by remember { mutableStateOf(false) }
+
+    var email by remember {
+        mutableStateOf("")
+    }
+
+    var password by remember {
+        mutableStateOf("")
+    }
+
+    var message by remember {
+        mutableStateOf("")
+    }
+
+    var busy by remember {
+        mutableStateOf(false)
+    }
+
+    var resetBusy by remember {
+        mutableStateOf(false)
+    }
 
     Column(
         modifier = Modifier
@@ -129,49 +155,74 @@ private fun LoginScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
+
         Text(
-            stringResource(com.speqta.staffpayroll.R.string.brand_app_name),
+            stringResource(
+                com.speqta.staffpayroll.R.string.brand_app_name
+            ),
             style = MaterialTheme.typography.headlineMedium
         )
-        Spacer(Modifier.height(8.dp))
+
+        Spacer(
+            modifier = Modifier.height(8.dp)
+        )
+
         Text(
             "Milestone 3.2 — Role & Tenant Management",
             style = MaterialTheme.typography.titleMedium
         )
-        Spacer(Modifier.height(28.dp))
+
+        Spacer(
+            modifier = Modifier.height(28.dp)
+        )
 
         OutlinedTextField(
             value = email,
-            onValueChange = { email = it; message = "" },
+            onValueChange = {
+                email = it
+                message = ""
+            },
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Email") },
+            label = {
+                Text("Email")
+            },
             singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
             enabled = !busy && !resetBusy
         )
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(
+            modifier = Modifier.height(12.dp)
+        )
 
         OutlinedTextField(
             value = password,
-            onValueChange = { password = it; message = "" },
+            onValueChange = {
+                password = it
+                message = ""
+            },
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Password") },
+            label = {
+                Text("Password")
+            },
             singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             enabled = !busy && !resetBusy
         )
 
-        Spacer(Modifier.height(20.dp))
+        Spacer(
+            modifier = Modifier.height(20.dp)
+        )
 
         Button(
             onClick = {
+
                 val cleanEmail = email.trim()
+
                 if (cleanEmail.isBlank()) {
                     message = "Please enter your email address."
                     return@Button
                 }
+
                 if (password.isBlank()) {
                     message = "Please enter your password."
                     return@Button
@@ -179,50 +230,105 @@ private fun LoginScreen(
 
                 busy = true
                 message = ""
-                auth.signInWithEmailAndPassword(cleanEmail, password)
-                    .addOnCompleteListener { task ->
-                        busy = false
-                        if (task.isSuccessful) {
-                            onSignedIn()
-                        } else {
-                            message = friendlyAuthError(task.exception)
-                        }
+
+                auth.signInWithEmailAndPassword(
+                    cleanEmail,
+                    password
+                ).addOnCompleteListener { task ->
+
+                    busy = false
+
+                    if (task.isSuccessful) {
+                        onSignedIn()
+                    } else {
+                        message = friendlyAuthError(
+                            task.exception
+                        )
                     }
+                }
             },
             modifier = Modifier.fillMaxWidth(),
             enabled = !busy && !resetBusy
         ) {
-            if (busy) CircularProgressIndicator()
-            else Text("Sign in")
+
+            if (busy) {
+                CircularProgressIndicator()
+            } else {
+                Text("Sign in")
+            }
         }
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(
+            modifier = Modifier.height(8.dp)
+        )
 
         OutlinedButton(
             onClick = {
+
                 val cleanEmail = email.trim()
+
                 if (cleanEmail.isBlank()) {
-                    message = "Enter your email first to reset the password."
+                    message =
+                        "Enter your email first to reset the password."
                     return@OutlinedButton
                 }
 
                 resetBusy = true
                 message = ""
-                auth.sendPasswordResetEmail(cleanEmail)
-                    .addOnCompleteListener { task ->
-                        resetBusy = false
-                        message = if (task.isSuccessful) {
+
+                auth.sendPasswordResetEmail(
+                    cleanEmail
+                ).addOnCompleteListener { task ->
+
+                    resetBusy = false
+
+                    message =
+                        if (task.isSuccessful) {
                             "Password reset email sent. Check your inbox."
                         } else {
-                            friendlyAuthError(task.exception)
+                            friendlyAuthError(
+                                task.exception
+                            )
                         }
-                    }
+                }
             },
             modifier = Modifier.fillMaxWidth(),
             enabled = !busy && !resetBusy
         ) {
-            if (resetBusy) CircularProgressIndicator()
-            else Text("Forgot password?")
+
+            if (resetBusy) {
+                CircularProgressIndicator()
+            } else {
+                Text("Forgot password?")
+            }
+        }
+
+        Spacer(
+            modifier = Modifier.height(16.dp)
+        )
+
+        Text(
+            "M3.2 uses Firebase Authentication custom claims for role and tenant access. " +
+                "No user profile is created in developer Firestore.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        if (message.isNotBlank()) {
+
+            Spacer(
+                modifier = Modifier.height(16.dp)
+            )
+
+            Text(
+                message,
+                color =
+                    if (message.startsWith("Password reset")) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    }
+            )
         }
     }
 }
@@ -232,24 +338,45 @@ private fun RoleResolutionScreen(
     user: FirebaseUser,
     onSignOut: () -> Unit
 ) {
-    var loading by remember { mutableStateOf(true) }
-    var access by remember { mutableStateOf<AccessContext?>(null) }
-    var error by remember { mutableStateOf("") }
+
+    var loading by remember {
+        mutableStateOf(true)
+    }
+
+    var access by remember {
+        mutableStateOf<AccessContext?>(null)
+    }
+
+    var error by remember {
+        mutableStateOf("")
+    }
 
     LaunchedEffect(user.uid) {
+
         loading = true
         error = ""
         access = null
 
-        user.getIdToken(true).addOnCompleteListener { task ->
-            loading = false
-            if (task.isSuccessful) {
-                task.result?.let { access = accessFromToken(it) }
-                    ?: run { error = "Unable to verify your access. Please sign in again." }
-            } else {
-                error = "Unable to verify your access. Please sign in again."
+        user.getIdToken(true)
+            .addOnCompleteListener { task ->
+
+                loading = false
+
+                if (task.isSuccessful) {
+
+                    task.result?.let {
+                        access = accessFromToken(it)
+                    } ?: run {
+                        error =
+                            "Unable to verify your access. Please sign in again."
+                    }
+
+                } else {
+
+                    error =
+                        "Unable to verify your access. Please sign in again."
+                }
             }
-        }
     }
 
     if (loading) {
@@ -258,99 +385,244 @@ private fun RoleResolutionScreen(
     }
 
     if (error.isNotBlank()) {
-        ErrorScreen(error, onSignOut)
+        ErrorScreen(
+            message = error,
+            onSignOut = onSignOut
+        )
         return
     }
 
-    val resolved = access ?: AccessContext(UserRole.USER, null)
+    val resolved =
+        access ?: AccessContext(
+            UserRole.USER,
+            null
+        )
+
+    /*
+     * SUPER_ADMIN is global/system-level.
+     * It does not require tenantId.
+     */
 
     if (resolved.role == UserRole.SUPER_ADMIN) {
-        SuperAdminScreen(user.email.orEmpty(), onSignOut)
+
+        SuperAdminScreen(
+            email = user.email.orEmpty(),
+            onSignOut = onSignOut
+        )
+
         return
     }
 
+    /*
+     * ADMIN and USER are tenant-scoped.
+     * They must have a tenantId.
+     */
+
     if (resolved.tenantId.isNullOrBlank()) {
-        AccessNotConfiguredScreen(user.email.orEmpty(), resolved.role, onSignOut)
+
+        AccessNotConfiguredScreen(
+            email = user.email.orEmpty(),
+            role = resolved.role,
+            onSignOut = onSignOut
+        )
+
         return
     }
 
     when (resolved.role) {
-        UserRole.ADMIN -> AdminScreen(user.email.orEmpty(), resolved.tenantId, onSignOut)
-        UserRole.USER -> StandardUserScreen(user.email.orEmpty(), resolved.tenantId, onSignOut)
+
+        UserRole.ADMIN -> {
+
+            AdminScreen(
+                email = user.email.orEmpty(),
+                tenantId = resolved.tenantId,
+                onSignOut = onSignOut
+            )
+        }
+
+        UserRole.USER -> {
+
+            StandardUserScreen(
+                email = user.email.orEmpty(),
+                tenantId = resolved.tenantId,
+                onSignOut = onSignOut
+            )
+        }
+
         UserRole.SUPER_ADMIN -> Unit
     }
 }
 
-private fun accessFromToken(token: GetTokenResult): AccessContext {
-    val roleValue = token.claims["role"]?.toString()?.uppercase(Locale.ROOT)
-    val role = UserRole.entries.firstOrNull { it.claimValue == roleValue } ?: UserRole.USER
-    val tenantId = token.claims["tenantId"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-    return AccessContext(role, tenantId)
+private fun accessFromToken(
+    token: GetTokenResult
+): AccessContext {
+
+    val roleValue =
+        token.claims["role"]
+            ?.toString()
+            ?.uppercase(Locale.ROOT)
+
+    val role =
+        UserRole.entries.firstOrNull {
+            it.claimValue == roleValue
+        } ?: UserRole.USER
+
+    val tenantId =
+        token.claims["tenantId"]
+            ?.toString()
+            ?.trim()
+            ?.takeIf {
+                it.isNotEmpty()
+            }
+
+    return AccessContext(
+        role = role,
+        tenantId = tenantId
+    )
 }
 
 @Composable
-private fun SuperAdminScreen(email: String, onSignOut: () -> Unit) {
-    var showTenants by remember { mutableStateOf(false) }
+private fun SuperAdminScreen(
+    email: String,
+    onSignOut: () -> Unit
+) {
+
+    var showTenants by remember {
+        mutableStateOf(false)
+    }
 
     if (showTenants) {
+
         TenantManagementScreen(
-            onBack = { showTenants = false },
+            onBack = {
+                showTenants = false
+            },
             onSignOut = onSignOut
         )
+
         return
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(
+                rememberScrollState()
+            )
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("Super Admin", style = MaterialTheme.typography.headlineMedium)
-        Text(email.ifBlank { "Authenticated user" })
-        Text("Global / System Level", style = MaterialTheme.typography.labelLarge)
+
+        Text(
+            "Super Admin",
+            style = MaterialTheme.typography.headlineMedium
+        )
+
+        Text(
+            email.ifBlank {
+                "Authenticated user"
+            }
+        )
+
+        Text(
+            "Global / System Level",
+            style = MaterialTheme.typography.labelLarge
+        )
 
         Text(
             "Super Admin is a global system role and is not tied to a customer tenant.",
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp)) {
-                Text("Tenant Management", style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.height(6.dp))
+        Card(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+
+            Column(
+                modifier = Modifier.padding(16.dp)
+            ) {
+
                 Text(
-                    "Create and view customer tenants. Client IDs are generated centrally " +
-                        "as CL-000001, CL-000002, etc. Deleted IDs are never reused."
+                    "Tenant Management",
+                    style = MaterialTheme.typography.titleLarge
                 )
-                Spacer(Modifier.height(12.dp))
+
+                Spacer(
+                    modifier = Modifier.height(6.dp)
+                )
+
+                Text(
+                    "Create and view customer tenants. Client IDs are generated " +
+                        "centrally as CL-000001, CL-000002, etc."
+                )
+
+                Spacer(
+                    modifier = Modifier.height(12.dp)
+                )
+
                 Button(
-                    onClick = { showTenants = true },
+                    onClick = {
+                        showTenants = true
+                    },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Open Tenant Management")
+                    Text(
+                        "Open Tenant Management"
+                    )
                 }
             }
         }
 
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp)) {
-                Text("Admin Management", style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.height(6.dp))
-                Text("Reserved for the Admin assignment milestone.")
+        Card(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+
+            Column(
+                modifier = Modifier.padding(16.dp)
+            ) {
+
+                Text(
+                    "Admin Management",
+                    style = MaterialTheme.typography.titleLarge
+                )
+
+                Spacer(
+                    modifier = Modifier.height(6.dp)
+                )
+
+                Text(
+                    "Reserved for the Admin assignment milestone."
+                )
             }
         }
 
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp)) {
-                Text("License Management", style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.height(6.dp))
-                Text("Reserved for the locked License & User-Owned Cloud milestone.")
+        Card(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+
+            Column(
+                modifier = Modifier.padding(16.dp)
+            ) {
+
+                Text(
+                    "License Management",
+                    style = MaterialTheme.typography.titleLarge
+                )
+
+                Spacer(
+                    modifier = Modifier.height(6.dp)
+                )
+
+                Text(
+                    "Reserved for the locked License & User-Owned Cloud milestone."
+                )
             }
         }
 
-        OutlinedButton(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = onSignOut,
+            modifier = Modifier.fillMaxWidth()
+        ) {
             Text("Sign out")
         }
     }
@@ -361,34 +633,83 @@ private fun TenantManagementScreen(
     onBack: () -> Unit,
     onSignOut: () -> Unit
 ) {
-    val db = remember { FirebaseFirestore.getInstance() }
 
-    var tenants by remember { mutableStateOf<List<TenantRecord>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-    var saving by remember { mutableStateOf(false) }
-    var showCreate by remember { mutableStateOf(false) }
-    var clientName by remember { mutableStateOf("") }
-    var message by remember { mutableStateOf("") }
+    val db =
+        remember {
+            FirebaseFirestore.getInstance()
+        }
+
+    var tenants by remember {
+        mutableStateOf<List<TenantRecord>>(
+            emptyList()
+        )
+    }
+
+    var loading by remember {
+        mutableStateOf(true)
+    }
+
+    var saving by remember {
+        mutableStateOf(false)
+    }
+
+    var showCreate by remember {
+        mutableStateOf(false)
+    }
+
+    var clientName by remember {
+        mutableStateOf("")
+    }
+
+    var message by remember {
+        mutableStateOf("")
+    }
 
     fun loadTenants() {
+
         loading = true
         message = ""
+
         db.collection("tenants")
-            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .orderBy(
+                "createdAt",
+                Query.Direction.DESCENDING
+            )
             .get()
             .addOnCompleteListener { task ->
+
                 loading = false
+
                 if (task.isSuccessful) {
-                    tenants = task.result?.documents?.mapNotNull { doc ->
-                        val name = doc.getString("clientName") ?: return@mapNotNull null
-                        TenantRecord(
-                            id = doc.id,
-                            clientName = name,
-                            status = doc.getString("status") ?: "ACTIVE"
-                        )
-                    }.orEmpty()
+
+                    tenants =
+                        task.result
+                            ?.documents
+                            ?.mapNotNull { doc ->
+
+                                val name =
+                                    doc.getString(
+                                        "clientName"
+                                    )
+                                        ?: return@mapNotNull null
+
+                                TenantRecord(
+                                    id = doc.id,
+                                    clientName = name,
+                                    status =
+                                        doc.getString(
+                                            "status"
+                                        ) ?: "ACTIVE"
+                                )
+                            }
+                            .orEmpty()
+
                 } else {
-                    message = firestoreFriendlyError(task.exception)
+
+                    message =
+                        firestoreFriendlyError(
+                            task.exception
+                        )
                 }
             }
     }
@@ -400,46 +721,83 @@ private fun TenantManagementScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(
+                rememberScrollState()
+            )
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement =
+                Arrangement.spacedBy(8.dp)
         ) {
-            OutlinedButton(onClick = onBack, modifier = Modifier.weight(1f)) {
+
+            OutlinedButton(
+                onClick = onBack,
+                modifier = Modifier.weight(1f)
+            ) {
                 Text("Back")
             }
-            OutlinedButton(onClick = onSignOut, modifier = Modifier.weight(1f)) {
+
+            OutlinedButton(
+                onClick = onSignOut,
+                modifier = Modifier.weight(1f)
+            ) {
                 Text("Sign out")
             }
         }
 
-        Text("Tenant Management", style = MaterialTheme.typography.headlineMedium)
+        Text(
+            "Tenant Management",
+            style = MaterialTheme.typography.headlineMedium
+        )
+
         Text(
             "Super Admin only • Customer tenant registry",
-            style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
         Button(
             onClick = {
+
                 showCreate = !showCreate
                 clientName = ""
                 message = ""
+
             },
             modifier = Modifier.fillMaxWidth(),
             enabled = !saving
         ) {
-            Text(if (showCreate) "Cancel Create" else "Create Tenant")
+
+            Text(
+                if (showCreate) {
+                    "Cancel Create"
+                } else {
+                    "Create Tenant"
+                }
+            )
         }
 
         if (showCreate) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("New Tenant", style = MaterialTheme.typography.titleLarge)
-                    Spacer(Modifier.height(10.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth()
+            ) {
+
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+
+                    Text(
+                        "New Tenant",
+                        style = MaterialTheme.typography.titleLarge
+                    )
+
+                    Spacer(
+                        modifier = Modifier.height(10.dp)
+                    )
 
                     OutlinedTextField(
                         value = clientName,
@@ -448,120 +806,223 @@ private fun TenantManagementScreen(
                             message = ""
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Client / Tenant Name *") },
+                        label = {
+                            Text("Client / Tenant Name *")
+                        },
                         singleLine = true,
                         enabled = !saving
                     )
 
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(
+                        modifier = Modifier.height(12.dp)
+                    )
 
                     Button(
                         onClick = {
-                            val name = clientName.trim()
+
+                            val name =
+                                clientName.trim()
+
                             if (name.isBlank()) {
-                                message = "Client / Tenant Name is required."
+
+                                message =
+                                    "Client / Tenant Name is required."
+
                                 return@Button
                             }
 
                             saving = true
                             message = ""
 
-                            val counterRef = db.collection("system")
-                                .document("counters")
-                            val tenantRef = db.collection("tenants").document()
-                            val user = FirebaseAuth.getInstance().currentUser
+                            val counterRef =
+                                db.collection("system")
+                                    .document("counters")
+
+                            val tenantRef =
+                                db.collection("tenants")
+                                    .document()
+
+                            val currentUser =
+                                FirebaseAuth
+                                    .getInstance()
+                                    .currentUser
 
                             db.runTransaction { transaction ->
-                                val counterSnapshot = transaction.get(counterRef)
+
+                                val counterSnapshot =
+                                    transaction.get(
+                                        counterRef
+                                    )
+
                                 val nextNumber =
-                                    counterSnapshot.getLong("nextClientNumber") ?: 1L
+                                    counterSnapshot
+                                        .getLong(
+                                            "nextClientNumber"
+                                        )
+                                        ?: 1L
 
-                                val clientId = "CL-%06d".format(Locale.ROOT, nextNumber)
+                                val clientId =
+                                    "CL-%06d".format(
+                                        Locale.ROOT,
+                                        nextNumber
+                                    )
 
-                                val tenantData = hashMapOf(
-                                    "clientId" to clientId,
-                                    "clientName" to name,
-                                    "status" to "ACTIVE",
-                                    "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
-                                    "createdByUid" to (user?.uid ?: "")
-                                )
+                                val tenantData =
+                                    hashMapOf(
+                                        "clientId" to clientId,
+                                        "clientName" to name,
+                                        "status" to "ACTIVE",
+                                        "createdAt" to
+                                            FieldValue.serverTimestamp(),
+                                        "createdByUid" to
+                                            (
+                                                currentUser?.uid
+                                                    ?: ""
+                                            )
+                                    )
 
                                 transaction.set(
                                     counterRef,
-                                    mapOf("nextClientNumber" to nextNumber + 1L),
+                                    mapOf(
+                                        "nextClientNumber" to
+                                            nextNumber + 1L
+                                    ),
                                     SetOptions.merge()
                                 )
-                                transaction.set(tenantRef, tenantData)
+
+                                transaction.set(
+                                    tenantRef,
+                                    tenantData
+                                )
 
                                 clientId
+
                             }.addOnCompleteListener { task ->
+
                                 saving = false
+
                                 if (task.isSuccessful) {
-                                    val newId = task.result ?: "new tenant"
-                                    message = "Tenant created successfully: $newId"
+
+                                    val newId =
+                                        task.result
+                                            ?: "new tenant"
+
+                                    message =
+                                        "Tenant created successfully: $newId"
+
                                     clientName = ""
                                     showCreate = false
+
                                     loadTenants()
+
                                 } else {
-                                    message = firestoreFriendlyError(task.exception)
+
+                                    message =
+                                        firestoreFriendlyError(
+                                            task.exception
+                                        )
                                 }
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),
                         enabled = !saving
                     ) {
-                        if (saving) CircularProgressIndicator()
-                        else Text("Save Tenant")
+
+                        if (saving) {
+                            CircularProgressIndicator()
+                        } else {
+                            Text("Save Tenant")
+                        }
                     }
                 }
             }
         }
 
         if (message.isNotBlank()) {
+
             Text(
                 message,
-                color = if (
-                    message.startsWith("Tenant created successfully")
-                ) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.error
+                color =
+                    if (
+                        message.startsWith(
+                            "Tenant created successfully"
+                        )
+                    ) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    }
             )
         }
 
-        Text("Existing Tenants", style = MaterialTheme.typography.titleLarge)
+        Text(
+            "Existing Tenants",
+            style = MaterialTheme.typography.titleLarge
+        )
 
         if (loading) {
+
             CircularProgressIndicator()
+
         } else if (tenants.isEmpty()) {
+
             Text(
                 "No tenants created yet.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color =
+                    MaterialTheme.colorScheme.onSurfaceVariant
             )
+
         } else {
+
             tenants.forEach { tenant ->
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(16.dp)) {
+
+                Card(
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+
                         Text(
                             tenant.id,
-                            style = MaterialTheme.typography.labelLarge
+                            style =
+                                MaterialTheme.typography.labelLarge
                         )
-                        Spacer(Modifier.height(4.dp))
+
+                        Spacer(
+                            modifier = Modifier.height(4.dp)
+                        )
+
                         Text(
                             tenant.clientName,
-                            style = MaterialTheme.typography.titleMedium
+                            style =
+                                MaterialTheme.typography.titleMedium
                         )
-                        Spacer(Modifier.height(4.dp))
-                        Text("Status: ${tenant.status}")
+
+                        Spacer(
+                            modifier = Modifier.height(4.dp)
+                        )
+
+                        Text(
+                            "Status: ${tenant.status}"
+                        )
                     }
                 }
             }
         }
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(
+            modifier = Modifier.height(8.dp)
+        )
+
         Text(
-            "P2 intentionally does not provide hard-delete. Client IDs must never be reused. " +
-                "Edit/deactivate and Admin assignment will be added in later controlled milestones.",
+            "P2 intentionally does not provide hard-delete. Client IDs must " +
+                "never be reused. Edit/deactivate and Admin assignment will " +
+                "be added in later controlled milestones.",
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color =
+                MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }
@@ -572,10 +1033,13 @@ private fun AdminScreen(
     tenantId: String,
     onSignOut: () -> Unit
 ) {
+
     SimpleRoleScreen(
         title = "Admin",
         email = email,
-        details = "Tenant: $tenantId\nAdministrative access is active for this tenant.",
+        details =
+            "Tenant: $tenantId\n" +
+                "Administrative access is active for this tenant.",
         onSignOut = onSignOut
     )
 }
@@ -586,10 +1050,13 @@ private fun StandardUserScreen(
     tenantId: String,
     onSignOut: () -> Unit
 ) {
+
     SimpleRoleScreen(
         title = "Signed in",
         email = email,
-        details = "Tenant: $tenantId\nNo administrative role is assigned to this account.",
+        details =
+            "Tenant: $tenantId\n" +
+                "No administrative role is assigned to this account.",
         onSignOut = onSignOut
     )
 }
@@ -601,6 +1068,7 @@ private fun SimpleRoleScreen(
     details: String,
     onSignOut: () -> Unit
 ) {
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -608,13 +1076,40 @@ private fun SimpleRoleScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Text(title, style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(8.dp))
-        Text(email.ifBlank { "Authenticated user" })
-        Spacer(Modifier.height(16.dp))
-        Text(details, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(24.dp))
-        OutlinedButton(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) {
+
+        Text(
+            title,
+            style = MaterialTheme.typography.headlineSmall
+        )
+
+        Spacer(
+            modifier = Modifier.height(8.dp)
+        )
+
+        Text(
+            email.ifBlank {
+                "Authenticated user"
+            }
+        )
+
+        Spacer(
+            modifier = Modifier.height(16.dp)
+        )
+
+        Text(
+            details,
+            color =
+                MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(
+            modifier = Modifier.height(24.dp)
+        )
+
+        OutlinedButton(
+            onClick = onSignOut,
+            modifier = Modifier.fillMaxWidth()
+        ) {
             Text("Sign out")
         }
     }
@@ -626,6 +1121,7 @@ private fun AccessNotConfiguredScreen(
     role: UserRole,
     onSignOut: () -> Unit
 ) {
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -633,49 +1129,113 @@ private fun AccessNotConfiguredScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Text("Access not configured", style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(10.dp))
-        Text(email.ifBlank { "Authenticated user" })
-        Spacer(Modifier.height(8.dp))
-        Text("Role: ${role.claimValue}", style = MaterialTheme.typography.labelLarge)
-        Spacer(Modifier.height(16.dp))
+
+        Text(
+            "Access not configured",
+            style = MaterialTheme.typography.headlineSmall
+        )
+
+        Spacer(
+            modifier = Modifier.height(10.dp)
+        )
+
+        Text(
+            email.ifBlank {
+                "Authenticated user"
+            }
+        )
+
+        Spacer(
+            modifier = Modifier.height(8.dp)
+        )
+
+        Text(
+            "Role: ${role.claimValue}",
+            style = MaterialTheme.typography.labelLarge
+        )
+
+        Spacer(
+            modifier = Modifier.height(16.dp)
+        )
+
         Text(
             "This account is authenticated, but no tenant has been assigned. " +
-                "A trusted onboarding/licensing process must assign the tenant before the app can continue.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+                "A trusted onboarding/licensing process must assign the tenant " +
+                "before the app can continue.",
+            color =
+                MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Spacer(Modifier.height(20.dp))
-        OutlinedButton(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) {
+
+        Spacer(
+            modifier = Modifier.height(20.dp)
+        )
+
+        OutlinedButton(
+            onClick = onSignOut,
+            modifier = Modifier.fillMaxWidth()
+        ) {
             Text("Sign out")
         }
     }
 }
 
 @Composable
-private fun LoadingScreen(message: String) {
+private fun LoadingScreen(
+    message: String
+) {
+
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
+
         CircularProgressIndicator()
-        Spacer(Modifier.height(16.dp))
+
+        Spacer(
+            modifier = Modifier.height(16.dp)
+        )
+
         Text(message)
     }
 }
 
 @Composable
-private fun ErrorScreen(message: String, onSignOut: () -> Unit) {
+private fun ErrorScreen(
+    message: String,
+    onSignOut: () -> Unit
+) {
+
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Text("Access verification failed", style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(12.dp))
-        Text(message, color = MaterialTheme.colorScheme.error)
-        Spacer(Modifier.height(20.dp))
-        OutlinedButton(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) {
+
+        Text(
+            "Access verification failed",
+            style = MaterialTheme.typography.headlineSmall
+        )
+
+        Spacer(
+            modifier = Modifier.height(12.dp)
+        )
+
+        Text(
+            message,
+            color = MaterialTheme.colorScheme.error
+        )
+
+        Spacer(
+            modifier = Modifier.height(20.dp)
+        )
+
+        OutlinedButton(
+            onClick = onSignOut,
+            modifier = Modifier.fillMaxWidth()
+        ) {
             Text("Return to sign in")
         }
     }
@@ -683,17 +1243,25 @@ private fun ErrorScreen(message: String, onSignOut: () -> Unit) {
 
 @Composable
 private fun FirebaseConfigurationError() {
+
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
+
         Text(
             "Firebase configuration error",
             style = MaterialTheme.typography.headlineSmall,
             color = MaterialTheme.colorScheme.error
         )
-        Spacer(Modifier.height(12.dp))
+
+        Spacer(
+            modifier = Modifier.height(12.dp)
+        )
+
         Text(
             "google-services.json could not be initialized. " +
                 "Please verify the Firebase Android configuration."
@@ -701,31 +1269,60 @@ private fun FirebaseConfigurationError() {
     }
 }
 
-private fun firestoreFriendlyError(exception: Exception?): String {
-    val message = exception?.message.orEmpty()
+private fun firestoreFriendlyError(
+    exception: Exception?
+): String {
+
+    val message =
+        exception?.message.orEmpty()
+
     return when {
-        message.contains("PERMISSION_DENIED", ignoreCase = true) ->
+
+        message.contains(
+            "PERMISSION_DENIED",
+            ignoreCase = true
+        ) ->
             "Firestore permission denied. Check the M3.2-P2 Firestore rules."
-        message.contains("network", ignoreCase = true) ->
+
+        message.contains(
+            "network",
+            ignoreCase = true
+        ) ->
             "Network error. Please check your internet connection."
+
         else ->
             "Unable to access tenant data. Please try again."
     }
 }
 
-private fun friendlyAuthError(exception: Exception?): String {
-    val message = exception?.message.orEmpty().lowercase(Locale.ROOT)
+private fun friendlyAuthError(
+    exception: Exception?
+): String {
+
+    val message =
+        exception?.message
+            .orEmpty()
+            .lowercase(Locale.ROOT)
+
     return when {
-        "no user record" in message || "user-not-found" in message ->
+
+        "no user record" in message ||
+            "user-not-found" in message ->
             "No account was found for this email."
-        "wrong password" in message || "invalid-credential" in message ->
+
+        "wrong password" in message ||
+            "invalid-credential" in message ->
             "Email or password is incorrect."
+
         "invalid email" in message ->
             "Please enter a valid email address."
+
         "too many requests" in message ->
             "Too many attempts. Please try again later."
+
         "network" in message ->
             "Network error. Please check your internet connection."
+
         else ->
             "Sign-in failed. Please check your email and password and try again."
     }
