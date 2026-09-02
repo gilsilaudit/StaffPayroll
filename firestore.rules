@@ -2,6 +2,47 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSuperAdmin() {
+      return signedIn()
+        && request.auth.token.role == "SUPER_ADMIN";
+    }
+
+    // --------------------------------------------------
+    // SUPER ADMIN GLOBAL COUNTER
+    // --------------------------------------------------
+
+    match /system/counters {
+      allow read, write: if isSuperAdmin();
+    }
+
+    // --------------------------------------------------
+    // TENANT MANAGEMENT
+    // --------------------------------------------------
+
+    match /tenants/{tenantId} {
+
+      // Only SUPER_ADMIN can view tenants.
+      allow read: if isSuperAdmin();
+
+      // Only SUPER_ADMIN can create tenants.
+      allow create: if isSuperAdmin();
+
+      // Only SUPER_ADMIN can update tenants.
+      allow update: if isSuperAdmin();
+
+      // Hard delete is intentionally disabled.
+      allow delete: if false;
+    }
+
+    // --------------------------------------------------
+    // EVERYTHING ELSE
+    // --------------------------------------------------
+
     match /{document=**} {
       allow read, write: if false;
     }
