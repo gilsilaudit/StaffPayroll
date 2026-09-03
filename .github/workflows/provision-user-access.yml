@@ -1,0 +1,49 @@
+name: Provision Developer Access
+
+on:
+  workflow_dispatch:
+    inputs:
+      email:
+        description: "Firebase Authentication email for a trusted Developer account"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    name: Provision developer role
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Firebase Admin SDK
+        run: npm install firebase-admin
+
+      - name: Provision developer access
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          TARGET_EMAIL: ${{ inputs.email }}
+        run: |
+          node <<'NODE'
+          const admin = require("firebase-admin");
+          const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+          admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+
+          async function main() {
+            const email = process.env.TARGET_EMAIL.trim();
+            if (!email) throw new Error("Email is required.");
+            const user = await admin.auth().getUserByEmail(email);
+            const claims = { ...(user.customClaims || {}), role: "DEVELOPER" };
+            delete claims.tenantId;
+            await admin.auth().setCustomUserClaims(user.uid, claims);
+            console.log(`Developer access provisioned for ${email}. Sign out/in again to refresh claims.`);
+          }
+
+          main().catch(error => { console.error(error.message); process.exit(1); });
+          NODE
