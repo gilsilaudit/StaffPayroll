@@ -12,8 +12,8 @@ android {
         applicationId = "com.speqta.staffpayroll"
         minSdk = 24
         targetSdk = 37
-        versionCode = 5
-        versionName = "0.3.3"
+        versionCode = 14
+        versionName = "1.0.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
