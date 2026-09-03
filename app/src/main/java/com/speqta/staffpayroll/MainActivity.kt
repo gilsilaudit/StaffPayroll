@@ -56,7 +56,7 @@ private data class AccessContext(
 )
 
 private data class TenantRecord(
-    val id: String,
+    val clientId: String,
     val clientName: String,
     val status: String
 )
@@ -693,8 +693,18 @@ private fun TenantManagementScreen(
                                     )
                                         ?: return@mapNotNull null
 
+                                /*
+                                 * IMPORTANT:
+                                 * Display the generated Client ID stored
+                                 * in the clientId field, not the random
+                                 * Firestore document ID.
+                                 */
+                                val clientId =
+                                    doc.getString("clientId")
+                                        ?: return@mapNotNull null
+
                                 TenantRecord(
-                                    id = doc.id,
+                                    clientId = clientId,
                                     clientName = name,
                                     status =
                                         doc.getString(
@@ -984,8 +994,13 @@ private fun TenantManagementScreen(
                         modifier = Modifier.padding(16.dp)
                     ) {
 
+                        /*
+                         * FIX:
+                         * Show CL-000001 / CL-000002 etc.
+                         * instead of Firestore's random document ID.
+                         */
                         Text(
-                            tenant.id,
+                            tenant.clientId,
                             style =
                                 MaterialTheme.typography.labelLarge
                         )
