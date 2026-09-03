@@ -7,42 +7,347 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isSuperAdmin() {
-      return signedIn()
-        && request.auth.token.role == "SUPER_ADMIN";
+    function isDeveloper() {
+      return signedIn() && request.auth.token.role == "DEVELOPER";
     }
 
-    // --------------------------------------------------
-    // SUPER ADMIN GLOBAL COUNTER
-    // --------------------------------------------------
+    function userDoc(uid) {
+      return get(/databases/$(database)/documents/users/$(uid));
+    }
+
+    function hasTenantUser(tenantId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && userDoc(request.auth.uid).data.tenantId == tenantId
+        && userDoc(request.auth.uid).data.status == "ACTIVE";
+    }
+
+    function isTenantSuperAdmin(tenantId) {
+      return hasTenantUser(tenantId)
+        && userDoc(request.auth.uid).data.role == "SUPER_ADMIN";
+    }
+
+    function hasActiveLicenseForTenant(tenantId) {
+      return exists(/databases/$(database)/documents/tenants/$(tenantId))
+        && get(/databases/$(database)/documents/tenants/$(tenantId)).data.activeLicenseId != null
+        && exists(/databases/$(database)/documents/licenses/$(get(/databases/$(database)/documents/tenants/$(tenantId)).data.activeLicenseId))
+        && get(/databases/$(database)/documents/licenses/$(get(/databases/$(database)/documents/tenants/$(tenantId)).data.activeLicenseId)).data.status == "ACTIVE"
+        && get(/databases/$(database)/documents/licenses/$(get(/databases/$(database)/documents/tenants/$(tenantId)).data.activeLicenseId)).data.validUntil >= request.time;
+    }
+
+    function isValidDemoLicenseId(licenseId) {
+      return signedIn() && licenseId.matches("DEMO-LIC-" + request.auth.uid + "-[1-9][0-9]*");
+    }
+
+    function ownUser(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
 
     match /system/counters {
-      allow read, write: if isSuperAdmin();
+      allow read, write: if isDeveloper();
     }
 
-    // --------------------------------------------------
-    // TENANT MANAGEMENT
-    // --------------------------------------------------
-
-    match /tenants/{tenantId} {
-
-      // Only SUPER_ADMIN can view tenants.
-      allow read: if isSuperAdmin();
-
-      // Only SUPER_ADMIN can create tenants.
-      allow create: if isSuperAdmin();
-
-      // Only SUPER_ADMIN can update tenants.
-      allow update: if isSuperAdmin();
-
-      // Hard delete is intentionally disabled.
+    match /system/demoPolicy {
+      // Demo policy contains no secrets. Customers may read it so the public
+      // self-service demo screen can show the current offer before signup.
+      allow read: if true;
+      allow create, update: if isDeveloper()
+        && request.resource.data.durationDays >= 1
+        && request.resource.data.durationDays <= 365
+        && request.resource.data.staffLimit >= 1
+        && request.resource.data.staffLimit <= 10000
+        && request.resource.data.deviceLimit >= 1
+        && request.resource.data.deviceLimit <= 100;
       allow delete: if false;
     }
 
-    // --------------------------------------------------
-    // EVERYTHING ELSE
-    // --------------------------------------------------
+    match /system/leadPolicy {
+      allow read: if isDeveloper() || signedIn();
+      allow create, update: if isDeveloper()
+        && request.resource.data.statuses.size() >= 1
+        && request.resource.data.statuses.size() <= 50
+        && request.resource.data.statuses.hasAll(["NEW"]);
+      allow delete: if false;
+    }
 
+    match /tenants/{tenantId} {
+      allow read: if isDeveloper() || hasTenantUser(tenantId)
+        || (signedIn() && resource.data.primaryEmail == request.auth.token.email
+            && resource.data.status == "ACTIVE");
+
+      allow create: if isDeveloper()
+        || (signedIn()
+          && request.auth.token.email_verified == true
+          && tenantId == "demo-" + request.auth.uid
+          && request.resource.data.accountType == "DEMO"
+          && request.resource.data.status == "ACTIVE"
+          && request.resource.data.ownershipStatus == "ASSIGNED"
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.primaryEmail == request.auth.token.email
+          && request.resource.data.activeLicenseId.matches("DEMO-LIC-" + request.auth.uid + "-[1-9][0-9]*")
+          && request.resource.data.superAdminUids == [request.auth.uid]
+          && request.resource.data.superAdminEmails == [request.auth.token.email]);
+
+      // Developer can administer the tenant registry. The first customer owner may
+      // claim an unassigned licensed tenant exactly once. This is the customer
+      // onboarding path and does not require a manual Super Admin claim workflow.
+      allow update: if isDeveloper()
+        || (
+          signedIn()
+          && resource.data.status == "ACTIVE"
+          && resource.data.ownershipStatus == "UNASSIGNED"
+          && resource.data.primaryEmail == request.auth.token.email
+          && request.resource.data.ownershipStatus == "ASSIGNED"
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.primaryEmail == resource.data.primaryEmail
+          && request.resource.data.clientId == resource.data.clientId
+          && request.resource.data.clientName == resource.data.clientName
+          && hasActiveLicenseForTenant(tenantId)
+        )
+        || (
+          signedIn()
+          && resource.data.accountType == "DEMO"
+          && resource.data.ownerUid == request.auth.uid
+          && request.resource.data.accountType == "DEMO"
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.activeLicenseId.matches("DEMO-LIC-" + request.auth.uid + "-[1-9][0-9]*")
+          && getAfter(/databases/$(database)/documents/licenses/$(request.resource.data.activeLicenseId)).data.licenseType == "DEMO"
+          && getAfter(/databases/$(database)/documents/licenses/$(request.resource.data.activeLicenseId)).data.tenantId == tenantId
+          && getAfter(/databases/$(database)/documents/licenses/$(request.resource.data.activeLicenseId)).data.customerEmail == request.auth.token.email
+          && getAfter(/databases/$(database)/documents/licenses/$(request.resource.data.activeLicenseId)).data.status == "ACTIVE"
+        );
+
+      allow delete: if false;
+    }
+
+    match /licenses/{licenseId} {
+      allow read: if isDeveloper()
+        || (signedIn() && resource.data.customerEmail == request.auth.token.email);
+      allow create: if isDeveloper()
+        || (signedIn()
+          && request.auth.token.email_verified == true
+          && isValidDemoLicenseId(licenseId)
+          && request.resource.data.licenseType == "DEMO"
+          && request.resource.data.status == "ACTIVE"
+          && request.resource.data.tenantId == "demo-" + request.auth.uid
+          && request.resource.data.customerEmail == request.auth.token.email
+          && request.resource.data.clientId == "DEMO-" + request.auth.uid
+          && exists(/databases/$(database)/documents/system/demoPolicy)
+          && request.resource.data.staffLimit == get(/databases/$(database)/documents/system/demoPolicy).data.staffLimit
+          && request.resource.data.deviceLimit == get(/databases/$(database)/documents/system/demoPolicy).data.deviceLimit
+          && request.resource.data.modules == get(/databases/$(database)/documents/system/demoPolicy).data.modules
+          && (
+            !exists(/databases/$(database)/documents/demoDeviceHistory/$(request.resource.data.deviceId))
+            || get(/databases/$(database)/documents/demoDeviceHistory/$(request.resource.data.deviceId)).data.resetAvailable == true
+          )
+          && request.resource.data.validUntil > request.time
+          && request.resource.data.validUntil <= request.time + duration.value(get(/databases/$(database)/documents/system/demoPolicy).data.durationDays, "d"));
+      allow update: if isDeveloper();
+      allow delete: if false;
+    }
+
+    match /licenseHistory/{historyId} {
+      allow read: if isDeveloper()
+        || (signedIn() && resource.data.customerEmail == request.auth.token.email);
+      allow create: if isDeveloper()
+        || (signedIn()
+          && request.auth.token.email_verified == true
+          && request.resource.data.licenseType == "DEMO"
+          && request.resource.data.action in ["DEMO_ACTIVATED", "DEMO_REACTIVATED_AFTER_RESET"]
+          && request.resource.data.tenantId == "demo-" + request.auth.uid
+          && isValidDemoLicenseId(request.resource.data.licenseId)
+          && request.resource.data.customerEmail == request.auth.token.email
+          && exists(/databases/$(database)/documents/system/demoPolicy)
+          && request.resource.data.newStaffLimit == get(/databases/$(database)/documents/system/demoPolicy).data.staffLimit
+          && request.resource.data.newDeviceLimit == get(/databases/$(database)/documents/system/demoPolicy).data.deviceLimit
+          && request.resource.data.newValidUntil <= request.time + duration.value(get(/databases/$(database)/documents/system/demoPolicy).data.durationDays, "d"));
+      allow update, delete: if false;
+    }
+
+    match /demoDeviceHistory/{deviceId} {
+      // Minimal device-demo ledger. Customers can read only the specific ID their
+      // app knows locally; the document contains no business data.
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.auth.token.email_verified == true
+        && deviceId == request.resource.data.deviceId
+        && request.resource.data.firstUid == request.auth.uid
+        && request.resource.data.activationCount == 1
+        && request.resource.data.resetAvailable == false
+        && request.resource.data.status == "USED";
+      allow update: if isDeveloper()
+        || (signedIn()
+          && resource.data.lastUid == request.auth.uid
+          && request.resource.data.deviceId == resource.data.deviceId
+          && request.resource.data.firstUid == resource.data.firstUid
+          && request.resource.data.activationCount == resource.data.activationCount + 1
+          && resource.data.resetAvailable == true
+          && request.resource.data.resetAvailable == false
+          && request.resource.data.status == "USED");
+      allow delete: if false;
+    }
+
+    match /demoActivations/{activationId} {
+      allow read: if isDeveloper();
+      allow create: if signedIn()
+        && request.auth.token.email_verified == true
+        && request.resource.data.tenantId == "demo-" + request.auth.uid
+        && isValidDemoLicenseId(request.resource.data.licenseId)
+        && request.resource.data.customerEmail == request.auth.token.email
+        && request.resource.data.deviceId != null
+        && request.resource.data.activationNumber >= 1
+        && request.resource.data.activationType in ["FIRST_DEMO", "RE_DEMO_AFTER_RESET"];
+      allow update, delete: if false;
+    }
+
+    match /demoLeads/{leadId} {
+      allow read: if isDeveloper();
+      allow create, update: if isDeveloper();
+      allow delete: if false;
+    }
+
+    match /leads/{leadId} {
+      allow read: if isDeveloper();
+      allow create: if isDeveloper()
+        || (signedIn() && request.auth.token.email_verified == true
+          && request.resource.data.status == "NEW"
+          && request.resource.data.createdByUid == request.auth.uid
+          && request.resource.data.tenantId == "demo-" + request.auth.uid
+          && request.resource.data.email == request.auth.token.email
+          && request.resource.data.leadType in ["DEMO_BLOCKED", "DEMO_ACTIVATION"]);
+      allow update: if isDeveloper();
+      allow delete: if false;
+    }
+
+    match /users/{uid} {
+      allow read: if isDeveloper() || ownUser(uid)
+        || (signedIn() && resource.data.tenantId != null && hasTenantUser(resource.data.tenantId)
+            && isTenantSuperAdmin(resource.data.tenantId));
+
+      // Customer creates their own first user after successfully claiming the tenant.
+      allow create: if ownUser(uid)
+        && request.resource.data.role == "SUPER_ADMIN"
+        && request.resource.data.status == "ACTIVE"
+        && request.resource.data.tenantId != null
+        && getAfter(/databases/$(database)/documents/tenants/$(request.resource.data.tenantId)).data.ownerUid == request.auth.uid
+        && request.resource.data.uid == request.auth.uid;
+
+      // Super Admin may manage user metadata for their own tenant. Role changes are
+      // deliberately constrained to known application roles.
+      allow update: if isDeveloper()
+        || (
+          ownUser(uid)
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.tenantId == resource.data.tenantId
+          && request.resource.data.role == resource.data.role
+        )
+        || (
+          signedIn()
+          && resource.data.tenantId != null
+          && isTenantSuperAdmin(resource.data.tenantId)
+          && request.resource.data.tenantId == resource.data.tenantId
+          && request.resource.data.role in ["SUPER_ADMIN", "ADMIN", "USER"]
+        );
+
+      allow delete: if false;
+    }
+
+    match /devices/{deviceId} {
+      allow read: if isDeveloper()
+        || (signedIn() && resource.data.uid == request.auth.uid)
+        || (signedIn() && resource.data.tenantId != null && isTenantSuperAdmin(resource.data.tenantId));
+
+      // Customer device registration: user can create only their own device, for their tenant.
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && hasTenantUser(request.resource.data.tenantId)
+        && hasActiveLicenseForTenant(request.resource.data.tenantId)
+        && request.resource.data.status == "ACTIVE";
+
+      // Owner may update only their own device status metadata; Super Admin may revoke.
+      allow update: if isDeveloper()
+        || (
+          signedIn()
+          && resource.data.uid == request.auth.uid
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.tenantId == resource.data.tenantId
+        )
+        || (
+          signedIn()
+          && resource.data.tenantId != null
+          && isTenantSuperAdmin(resource.data.tenantId)
+          && request.resource.data.tenantId == resource.data.tenantId
+        );
+
+      allow delete: if false;
+    }
+
+
+    match /deviceSlots/{slotId} {
+      allow read: if isDeveloper()
+        || (signedIn() && resource.data.uid == request.auth.uid)
+        || (signedIn() && resource.data.tenantId != null && isTenantSuperAdmin(resource.data.tenantId));
+
+      allow create: if signedIn()
+        && request.resource.data.tenantId != null
+        && hasTenantUser(request.resource.data.tenantId)
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.status == "ACTIVE"
+        && request.resource.data.slotNumber >= 1
+        && request.resource.data.slotNumber <= get(/databases/$(database)/documents/licenses/$(request.resource.data.licenseId)).data.deviceLimit
+        && get(/databases/$(database)/documents/licenses/$(request.resource.data.licenseId)).data.status == "ACTIVE"
+        && get(/databases/$(database)/documents/licenses/$(request.resource.data.licenseId)).data.validUntil >= request.time;
+
+      allow update: if isDeveloper()
+        || (signedIn() && request.resource.data.tenantId == resource.data.tenantId && isTenantSuperAdmin(resource.data.tenantId))
+        || (signedIn() && request.resource.data.uid == request.auth.uid && request.resource.data.tenantId == resource.data.tenantId);
+      allow delete: if false;
+    }
+
+    match /sessions/{sessionId} {
+      allow read: if isDeveloper()
+        || (signedIn() && resource.data.uid == request.auth.uid)
+        || (signedIn() && resource.data.tenantId != null && isTenantSuperAdmin(resource.data.tenantId));
+
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && hasTenantUser(request.resource.data.tenantId)
+        && hasActiveLicenseForTenant(request.resource.data.tenantId)
+        && request.resource.data.status == "ACTIVE";
+
+      allow update: if isDeveloper()
+        || (
+          signedIn()
+          && resource.data.uid == request.auth.uid
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.tenantId == resource.data.tenantId
+        )
+        || (
+          signedIn()
+          && resource.data.tenantId != null
+          && isTenantSuperAdmin(resource.data.tenantId)
+          && request.resource.data.tenantId == resource.data.tenantId
+        );
+
+      allow delete: if false;
+    }
+
+    match /provisioning/{provisioningId} {
+      allow read: if isDeveloper() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
+      allow update: if isDeveloper() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow delete: if false;
+    }
+
+    match /auditLogs/{auditId} {
+      allow read: if isDeveloper()
+        || (signedIn() && resource.data.tenantId != null && hasTenantUser(resource.data.tenantId));
+      allow create: if isDeveloper()
+        || (signedIn() && request.resource.data.tenantId != null && hasTenantUser(request.resource.data.tenantId));
+      allow update, delete: if false;
+    }
+
+    // Customer business-data boundary remains closed until later milestones.
     match /{document=**} {
       allow read, write: if false;
     }
