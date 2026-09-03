@@ -168,6 +168,116 @@ private fun AuthenticationRoot(firebaseReady: Boolean, context: Context) {
 }
 
 @Composable
+private fun AccessRouter(user: FirebaseUser, context: Context, onSignOut: () -> Unit) {
+    var loading by remember(user.uid) { mutableStateOf(true) }
+    var error by remember(user.uid) { mutableStateOf("") }
+    var userRecord by remember(user.uid) { mutableStateOf<UserRecord?>(null) }
+    var developer by remember(user.uid) { mutableStateOf(false) }
+    var deviceId by remember(user.uid) { mutableStateOf("") }
+    var sessionId by remember(user.uid) { mutableStateOf("") }
+
+    LaunchedEffect(user.uid) {
+        loading = true
+        error = ""
+        userRecord = null
+        developer = false
+        deviceId = ""
+        sessionId = ""
+
+        user.reload().addOnCompleteListener { reloadTask ->
+            if (!reloadTask.isSuccessful) {
+                loading = false
+                error = friendlyAuthError(reloadTask.exception)
+                return@addOnCompleteListener
+            }
+            if (!authIsVerified(user)) {
+                loading = false
+                error = "Please verify your email address first, then sign in again."
+                return@addOnCompleteListener
+            }
+
+            user.getIdToken(true).addOnCompleteListener { tokenTask ->
+                if (!tokenTask.isSuccessful) {
+                    loading = false
+                    error = friendlyAuthError(tokenTask.exception)
+                    return@addOnCompleteListener
+                }
+
+                val roleFromClaim = tokenTask.result?.let { accessRole(it) }
+                if (roleFromClaim == UserRole.DEVELOPER) {
+                    developer = true
+                    loading = false
+                    return@addOnCompleteListener
+                }
+
+                val db = FirebaseFirestore.getInstance()
+                db.collection("users").document(user.uid).get().addOnCompleteListener { userTask ->
+                    if (!userTask.isSuccessful) {
+                        loading = false
+                        error = firestoreFriendlyError(userTask.exception)
+                        return@addOnCompleteListener
+                    }
+
+                    val doc = userTask.result
+                    if (doc == null || !doc.exists()) {
+                        // A verified customer with no user record is expected to be
+                        // in the license-based first-time onboarding flow.
+                        loading = false
+                        return@addOnCompleteListener
+                    }
+
+                    val record = userRecordFrom(doc)
+                    if (record.status != "ACTIVE") {
+                        loading = false
+                        error = "Your user account is inactive. Please contact your Customer Super Admin."
+                        return@addOnCompleteListener
+                    }
+
+                    userRecord = record
+                    if (record.role == UserRole.SUPER_ADMIN || record.role == UserRole.ADMIN || record.role == UserRole.USER) {
+                        ensureDeviceAndSession(context, record) { ok, sid, did, message ->
+                            deviceId = did
+                            sessionId = sid
+                            loading = false
+                            if (!ok) error = message
+                        }
+                    } else {
+                        loading = false
+                        error = "Unsupported user role. Please contact the License Team."
+                    }
+                }
+            }
+        }
+    }
+
+    if (loading) {
+        LoadingScreen("Verifying account and access…")
+        return
+    }
+    if (error.isNotBlank()) {
+        ErrorScreen(error, onSignOut)
+        return
+    }
+    if (developer) {
+        DeveloperScreen(user.email.orEmpty(), onSignOut)
+        return
+    }
+
+    val record = userRecord
+    if (record == null) {
+        CustomerOnboardingScreen(user, onSignOut)
+        return
+    }
+
+    when (record.role) {
+        UserRole.SUPER_ADMIN -> CustomerSuperAdminScreen(record, deviceId, sessionId, onSignOut)
+        UserRole.ADMIN -> SimpleRoleScreen("Admin", record, deviceId, sessionId, onSignOut)
+        UserRole.USER -> SimpleRoleScreen("Staff / User", record, deviceId, sessionId, onSignOut)
+        UserRole.DEVELOPER -> DeveloperScreen(user.email.orEmpty(), onSignOut)
+    }
+}
+
+@Composable
 private fun LoginScreen(auth: FirebaseAuth, onSignedIn: () -> Unit, onSignedUp: () -> Unit) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
