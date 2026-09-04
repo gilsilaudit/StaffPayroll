@@ -580,12 +580,9 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
                         if (!historyTask.isSuccessful) { busy = false; message = firestoreFriendlyError(historyTask.exception); return@addOnCompleteListener }
                         val history = historyTask.result!!
                         val resetAllowed = history.exists() && history.getBoolean("resetAvailable") == true
-                        if (history.exists() && !resetAllowed) {
-                            busy = false
-                            blockedByUsedDemo = true
-                            message = "Demo already used on this device/account. Kindly buy the license."
-                            return@addOnCompleteListener
-                        }
+                        // Device history is the anti-abuse ledger. It must NOT block the
+                        // owner from opening an already-active Demo account. That decision
+                        // is made after we load the account's tenant/user records below.
                         db.collection("tenants").document(tenantId).get().addOnCompleteListener { tenantTask ->
                             if (!tenantTask.isSuccessful) { busy = false; message = firestoreFriendlyError(tenantTask.exception); return@addOnCompleteListener }
                             val existingTenant = tenantTask.result!!
@@ -597,6 +594,40 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
                                 val existingUser = userTask.result!!
                                 if (existingUser.exists() && existingUser.getString("accountType") != "DEMO") {
                                     busy = false; message = "This account is already linked to a paid license. Please contact Sales Team."; return@addOnCompleteListener
+                                }
+
+                                // IMPORTANT UX RULE:
+                                // An ACTIVE Demo belonging to this same account is an existing
+                                // entitlement, not a request for a second Demo. If the customer
+                                // reaches this screen again, simply continue into the account.
+                                val demoValidUntil = existingTenant.getTimestamp("demoValidUntil")
+                                val existingActiveDemo = existingTenant.exists()
+                                    && existingTenant.getString("accountType") == "DEMO"
+                                    && existingTenant.getString("status") == "ACTIVE"
+                                    && existingTenant.getString("ownerUid") == uid
+                                    && existingTenant.getString("activeLicenseId").orEmpty().isNotBlank()
+                                    && existingUser.exists()
+                                    && existingUser.getString("accountType") == "DEMO"
+                                    && existingUser.getString("status") == "ACTIVE"
+                                    && demoValidUntil != null
+                                    && demoValidUntil.toDate().after(Timestamp.now().toDate())
+
+                                if (existingActiveDemo) {
+                                    busy = false
+                                    blockedByUsedDemo = false
+                                    message = "Your existing Demo is active. Opening your Demo account…"
+                                    onActivated()
+                                    return@addOnCompleteListener
+                                }
+
+                                // Only a customer who does NOT already have an active Demo is
+                                // blocked by the device history. A Sales reset can explicitly
+                                // permit one additional Demo.
+                                if (history.exists() && !resetAllowed) {
+                                    busy = false
+                                    blockedByUsedDemo = true
+                                    message = "This device has already been used for a demo. Kindly buy the license."
+                                    return@addOnCompleteListener
                                 }
 
                                 val now = Timestamp.now()
@@ -722,11 +753,16 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
                     if(!t.isSuccessful){busy=false;message=friendlyAuthError(t.exception);return@addOnCompleteListener}
                     auth.currentUser?.reload()?.addOnCompleteListener{r->
                         if(!r.isSuccessful){busy=false;message=friendlyAuthError(r.exception);return@addOnCompleteListener}
-                        if(auth.currentUser?.isEmailVerified!=true){busy=false;message="Please verify your email first.";return@addOnCompleteListener}
-                        activateDemo()
+                        val existing = auth.currentUser
+                        if(existing?.isEmailVerified!=true){busy=false;message="Please verify your email first.";return@addOnCompleteListener}
+                        // Existing-account login is a LOGIN action, not a new Demo activation.
+                        // AccessRouter will verify the user/tenant/device/session and open the
+                        // existing Demo account without consuming another Demo entitlement.
+                        busy=false
+                        onActivated()
                     }
                 }
-            },Modifier.fillMaxWidth(),enabled=!busy&&!waitingForVerification){Text("Sign in Existing Demo Account")}
+            },Modifier.fillMaxWidth(),enabled=!busy&&!waitingForVerification){Text("Sign in to Existing Demo Account")}
 
             if(waitingForVerification){
                 Button(onClick={activateDemo()},Modifier.fillMaxWidth(),enabled=!busy&&!resendBusy){Text("I Have Verified My Email")}
