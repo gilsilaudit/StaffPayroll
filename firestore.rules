@@ -71,7 +71,13 @@ service cloud.firestore {
     }
 
     match /tenants/{tenantId} {
-      allow read: if isDeveloper() || hasTenantUser(tenantId)
+      // A newly-created self-service demo tenant does not have a users/{uid}
+      // document yet. Allow its owner to read only their own demo tenant.
+      // This is required for the demo activation transaction and does not
+      // grant access to any other tenant.
+      allow read: if isDeveloper()
+        || hasTenantUser(tenantId)
+        || (signedIn() && tenantId == "demo-" + request.auth.uid)
         || (signedIn() && resource.data.primaryEmail == request.auth.token.email
             && resource.data.status == "ACTIVE");
 
