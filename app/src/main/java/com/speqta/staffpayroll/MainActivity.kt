@@ -1310,7 +1310,15 @@ private fun CustomerOnboardingScreen(user: FirebaseUser, onSignOut: () -> Unit) 
             db.collection("licenses").whereEqualTo("customerEmail", email).whereEqualTo("status", "ACTIVE").whereGreaterThanOrEqualTo("validUntil", Timestamp.now()).limit(1).get().addOnCompleteListener { task ->
             if (!task.isSuccessful) { loading = false; message = firestoreFriendlyError(task.exception); return@addOnCompleteListener }
             val doc = task.result?.documents?.firstOrNull()
-            if (doc == null) { loading = false; message = "No active license is registered for this email. Please contact the License Team."; return@addOnCompleteListener }
+            if (doc == null) {
+                loading = false
+                message = if (user.isEmailVerified) {
+                    "No active license is registered for this email. If this is a Demo account, open Start Free Demo and complete email verification to activate it."
+                } else {
+                    "Please verify your email address first, then sign in again."
+                }
+                return@addOnCompleteListener
+            }
             val lic = licenseFrom(doc); license = lic
             db.collection("tenants").document(lic.tenantId).get().addOnCompleteListener { tenantTask ->
                 loading = false
