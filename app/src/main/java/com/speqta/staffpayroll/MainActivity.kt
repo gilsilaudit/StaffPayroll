@@ -542,12 +542,28 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
         current.reload().addOnCompleteListener { r ->
             if (!r.isSuccessful) { busy = false; message = friendlyAuthError(r.exception); return@addOnCompleteListener }
             val u = auth.currentUser
-            if (u?.isEmailVerified != true) {
+            if (u == null) {
                 busy = false
-                message = "Please verify your email, then tap 'I Have Verified My Email'."
+                message = "Your authentication session has expired. Please sign in again."
                 return@addOnCompleteListener
             }
-            val uid = u.uid
+
+            // Force-refresh the Firebase ID token so Firestore sees the latest
+            // email_verified claim after the user verifies the email.
+            u.getIdToken(true).addOnCompleteListener { tokenTask ->
+                if (!tokenTask.isSuccessful) {
+                    busy = false
+                    message = friendlyAuthError(tokenTask.exception)
+                    return@addOnCompleteListener
+                }
+                val refreshedUser = auth.currentUser
+                val verifiedClaim = tokenTask.result?.claims?.get("email_verified") == true
+                if (refreshedUser?.isEmailVerified != true || !verifiedClaim) {
+                    busy = false
+                    message = "Please verify your email, then tap 'I Have Verified My Email'."
+                    return@addOnCompleteListener
+                }
+                val uid = refreshedUser.uid
             val mail = u.email?.trim()?.lowercase(Locale.ROOT).orEmpty()
             val tenantId = "demo-$uid"
             val tenantRef = db.collection("tenants").document(tenantId)
@@ -668,13 +684,14 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
                     "changedAt" to now, "changedBy" to uid
                 ))
                 true
-            }.addOnCompleteListener { t ->
-                busy = false
-                if (t.isSuccessful) { message = "Free demo activated successfully."; onActivated() }
-                else if (t.exception is DemoAlreadyUsedException) {
-                    blockedByUsedDemo = true
-                    message = "Demo already used on this device/account. Kindly buy the license."
-                } else message = t.exception?.message ?: "Unable to activate demo."
+                }.addOnCompleteListener { t ->
+                    busy = false
+                    if (t.isSuccessful) { message = "Free demo activated successfully."; onActivated() }
+                    else if (t.exception is DemoAlreadyUsedException) {
+                        blockedByUsedDemo = true
+                        message = "Demo already used on this device/account. Kindly buy the license."
+                    } else message = firestoreFriendlyError(t.exception)
+                }
             }
         }
     }
