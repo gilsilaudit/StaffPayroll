@@ -6,6 +6,7 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,6 +38,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.google.firebase.FirebaseApp
@@ -54,6 +57,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 import java.util.UUID
+import kotlinx.coroutines.delay
 
 private const val DEFAULT_DEMO_DAYS = 3L
 private const val DEFAULT_DEMO_STAFF_LIMIT = 5L
@@ -66,6 +70,31 @@ private const val LEAD_POLICY_DOC = "leadPolicy"
 private const val LEADS_COLLECTION = "leads"
 
 private fun defaultDemoModules(): Map<String, Boolean> = mapOf("attendance" to true, "leave" to true, "salary" to true, "payroll" to true, "reports" to true)
+
+/** Returns null when the value is invalid; callers must not silently substitute a demo policy. */
+private fun validateIndianMobileNumber(raw: String): String? {
+    val phone = raw.trim()
+    return when {
+        phone.isBlank() -> "Mobile number is required."
+        phone.length != 10 -> "Enter a valid 10-digit Indian mobile number."
+        !phone.all(Char::isDigit) -> "Enter a valid 10-digit Indian mobile number."
+        phone.first() !in '6'..'9' -> "Enter a valid 10-digit Indian mobile number."
+        else -> null
+    }
+}
+
+private fun readStrictDemoPolicy(d: DocumentSnapshot): DemoPolicy {
+    if (!d.exists()) throw IllegalStateException("Demo policy is not configured.")
+    val duration = d.getLong("durationDays") ?: throw IllegalStateException("Demo policy duration is not configured.")
+    val staff = d.getLong("staffLimit") ?: throw IllegalStateException("Demo policy staff limit is not configured.")
+    val devices = d.getLong("deviceLimit") ?: throw IllegalStateException("Demo policy device limit is not configured.")
+    if (duration < 1L || staff < 1L || devices < 1L) throw IllegalStateException("Demo policy contains invalid limits.")
+    val modules = (d.get("modules") as? Map<*, *>)
+        ?.mapNotNull { (k, v) -> if (k != null && v is Boolean) k.toString() to v else null }
+        ?.toMap()
+        ?: emptyMap()
+    return DemoPolicy(duration, staff, devices, defaultDemoModules() + modules)
+}
 
 private data class DemoPolicy(val durationDays: Long, val staffLimit: Long, val deviceLimit: Long, val modules: Map<String, Boolean>)
 private data class LeadPolicy(val statuses: List<String>)
@@ -285,6 +314,36 @@ private fun LoginScreen(auth: FirebaseAuth, onSignedIn: () -> Unit, onSignedUp: 
     var busy by remember { mutableStateOf(false) }
     var showSignUp by remember { mutableStateOf(false) }
     var showDemo by remember { mutableStateOf(false) }
+    var demoPolicy by remember { mutableStateOf<DemoPolicy?>(null) }
+    var demoPolicyLoading by remember { mutableStateOf(true) }
+    var demoPolicyError by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        demoPolicyLoading = true
+        demoPolicyError = ""
+        FirebaseFirestore.getInstance().collection("system").document(DEMO_POLICY_DOC).get()
+            .addOnCompleteListener { task ->
+                demoPolicyLoading = false
+                if (task.isSuccessful && task.result?.exists() == true) {
+                    try {
+                        demoPolicy = readStrictDemoPolicy(task.result!!)
+                    } catch (e: Exception) {
+                        demoPolicy = null
+                        demoPolicyError = e.message ?: "Demo policy is not configured."
+                    }
+                } else if (task.isSuccessful) {
+                    demoPolicy = null
+                    demoPolicyError = "Demo policy is not configured right now."
+                } else {
+                    demoPolicy = null
+                    demoPolicyError = firestoreFriendlyError(task.exception)
+                }
+            }
+    }
+
+    BackHandler(enabled = showSignUp || showDemo) {
+        if (showDemo) showDemo = false else showSignUp = false
+    }
 
     if (showSignUp) {
         SignUpScreen(auth, email, onBack = { showSignUp = false }, onSignedUp = onSignedUp)
@@ -322,7 +381,18 @@ private fun LoginScreen(auth: FirebaseAuth, onSignedIn: () -> Unit, onSignedUp: 
         Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = { showSignUp = true }, Modifier.fillMaxWidth(), enabled = !busy) { Text("Create Customer Account") }
         Spacer(Modifier.height(8.dp))
-        Button(onClick = { showDemo = true }, Modifier.fillMaxWidth(), enabled = !busy) { Text("Start 3-Day Free Demo") }
+        Button(
+            onClick = { showDemo = true },
+            Modifier.fillMaxWidth(),
+            enabled = !busy && !demoPolicyLoading && demoPolicy != null
+        ) {
+            if (demoPolicyLoading) CircularProgressIndicator()
+            else Text("Start ${demoPolicy?.durationDays ?: ""}-Day Free Demo")
+        }
+        if (demoPolicyError.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text(demoPolicyError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(
             onClick = {
@@ -339,6 +409,7 @@ private fun LoginScreen(auth: FirebaseAuth, onSignedIn: () -> Unit, onSignedUp: 
 
 @Composable
 private fun SignUpScreen(auth: FirebaseAuth, initialEmail: String, onBack: () -> Unit, onSignedUp: () -> Unit) {
+    BackHandler { onBack() }
     var email by remember { mutableStateOf(initialEmail) }
     var password by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
@@ -389,6 +460,7 @@ private fun SignUpScreen(auth: FirebaseAuth, initialEmail: String, onBack: () ->
 
 @Composable
 private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: () -> Unit, onActivated: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var email by remember { mutableStateOf(initialEmail) }
     var password by remember { mutableStateOf("") }
@@ -402,13 +474,29 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
     var blockedByUsedDemo by remember { mutableStateOf(false) }
     var leadSubmitted by remember { mutableStateOf(false) }
     var policy by remember { mutableStateOf<DemoPolicy?>(null) }
+    var policyLoading by remember { mutableStateOf(true) }
+    var resendBusy by remember { mutableStateOf(false) }
+    var resendCooldown by remember { mutableStateOf(0) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val deviceId = remember { getStableDeviceId(context) }
 
     LaunchedEffect(Unit) {
+        policyLoading = true
         db.collection("system").document(DEMO_POLICY_DOC).get().addOnCompleteListener { t ->
-            if (t.isSuccessful && t.result?.exists() == true) policy = demoPolicyFrom(t.result!!)
-            else if (!t.isSuccessful) message = firestoreFriendlyError(t.exception)
+            policyLoading = false
+            if (t.isSuccessful && t.result?.exists() == true) {
+                try { policy = readStrictDemoPolicy(t.result!!) }
+                catch (e: Exception) { message = e.message ?: "Demo policy is not configured." }
+            } else if (t.isSuccessful) {
+                message = "Demo policy is not configured right now."
+            } else message = firestoreFriendlyError(t.exception)
+        }
+    }
+
+    LaunchedEffect(resendCooldown) {
+        if (resendCooldown > 0) {
+            delay(1000)
+            resendCooldown -= 1
         }
     }
 
@@ -419,6 +507,7 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
             businessName.isBlank() -> message = "Business name is required."
             mail.isBlank() || !mail.contains("@") -> message = "Enter a valid email address."
             phone.isBlank() -> message = "Mobile number is required so our Sales Team can call you."
+            validateIndianMobileNumber(phone) != null -> message = validateIndianMobileNumber(phone)!!
             else -> {
                 busy = true
                 db.collection(LEADS_COLLECTION).add(mapOf(
@@ -468,8 +557,7 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
 
             db.runTransaction { tx ->
                 val pd = tx.get(policyRef)
-                if (!pd.exists()) throw IllegalStateException("Demo policy is not configured.")
-                val p = demoPolicyFrom(pd)
+                val p = readStrictDemoPolicy(pd)
                 val history = tx.get(deviceHistoryRef)
                 val resetAllowed = history.exists() && history.getBoolean("resetAvailable") == true
                 if (history.exists() && !resetAllowed) {
@@ -599,10 +687,25 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
             OutlinedTextField(email,{email=it},Modifier.fillMaxWidth(),label={Text("Email")},singleLine=true,enabled=!busy&&!waitingForVerification)
             OutlinedTextField(customerName,{customerName=it},Modifier.fillMaxWidth(),label={Text("Your Name")},singleLine=true,enabled=!busy&&!waitingForVerification)
             OutlinedTextField(businessName,{businessName=it},Modifier.fillMaxWidth(),label={Text("Business Name")},singleLine=true,enabled=!busy&&!waitingForVerification)
-            OutlinedTextField(phone,{phone=it},Modifier.fillMaxWidth(),label={Text("Mobile Number")},singleLine=true,enabled=!busy&&!waitingForVerification)
+            OutlinedTextField(phone,{phone=it.filter(Char::isDigit).take(10)},Modifier.fillMaxWidth(),label={Text("Mobile Number")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone),enabled=!busy&&!waitingForVerification)
             OutlinedTextField(password,{password=it},Modifier.fillMaxWidth(),label={Text("Password")},singleLine=true,visualTransformation=PasswordVisualTransformation(),enabled=!busy&&!waitingForVerification)
             OutlinedTextField(confirm,{confirm=it},Modifier.fillMaxWidth(),label={Text("Confirm Password")},singleLine=true,visualTransformation=PasswordVisualTransformation(),enabled=!busy&&!waitingForVerification)
-            Button(onClick={val e=email.trim();when{e.isBlank()->message="Email is required.";!e.contains("@")->message="Enter a valid email address.";customerName.isBlank()->message="Your name is required.";businessName.isBlank()->message="Business name is required.";phone.isBlank()->message="Mobile number is required.";password.length<6->message="Password must be at least 6 characters.";password!=confirm->message="Passwords do not match.";policy==null->message="Demo policy is not available right now. Please try again later.";else->{busy=true;auth.createUserWithEmailAndPassword(e,password).addOnCompleteListener{t->if(!t.isSuccessful){busy=false;message=friendlyAuthError(t.exception);return@addOnCompleteListener};waitingForVerification=true;auth.currentUser?.sendEmailVerification()?.addOnCompleteListener{v->busy=false;message=if(v.isSuccessful)"Account created. Verify your email, then tap 'I Have Verified My Email'." else "Account created, but verification email could not be sent."}}}}},Modifier.fillMaxWidth(),enabled=!busy&&!waitingForVerification){if(busy)CircularProgressIndicator()else Text("Create Demo Account")}
+            Button(onClick={val e=email.trim();when{e.isBlank()->message="Email is required.";!e.contains("@")->message="Enter a valid email address.";customerName.isBlank()->message="Your name is required.";businessName.isBlank()->message="Business name is required.";phone.isBlank()->message="Mobile number is required.";validateIndianMobileNumber(phone)!=null->message=validateIndianMobileNumber(phone)!!;password.length<6->message="Password must be at least 6 characters.";password!=confirm->message="Passwords do not match.";policyLoading->message="Demo policy is still loading. Please wait a moment.";policy==null->message="Demo policy is not configured right now. Please contact the License Team.";else->{busy=true;auth.createUserWithEmailAndPassword(e,password).addOnCompleteListener{t->if(!t.isSuccessful){busy=false;message=friendlyAuthError(t.exception);return@addOnCompleteListener};waitingForVerification=true
+                        val createdUser = auth.currentUser
+                        if (createdUser == null) {
+                            busy=false
+                            message="Account created, but the verification session could not be opened. Please sign in again."
+                        } else {
+                            createdUser.sendEmailVerification().addOnCompleteListener { v ->
+                                busy=false
+                                if (v.isSuccessful) {
+                                    resendCooldown = 30
+                                    message="Account created. Verification email sent. Check your inbox and spam folder, verify your email, then tap 'I Have Verified My Email'."
+                                } else {
+                                    message="Account created, but the verification email could not be sent. ${friendlyAuthError(v.exception)}"
+                                }
+                            }
+                        }}}}},Modifier.fillMaxWidth(),enabled=!busy&&!waitingForVerification){if(busy)CircularProgressIndicator()else Text("Create Demo Account")}
             OutlinedButton(onClick={
                 val e=email.trim()
                 if(e.isBlank()||password.isBlank()){message="Enter the existing demo account email and password.";return@OutlinedButton}
@@ -617,7 +720,34 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
                 }
             },Modifier.fillMaxWidth(),enabled=!busy&&!waitingForVerification){Text("Sign in Existing Demo Account")}
 
-            if(waitingForVerification){Button(onClick={activateDemo()},Modifier.fillMaxWidth(),enabled=!busy){Text("I Have Verified My Email")};OutlinedButton(onClick={auth.currentUser?.sendEmailVerification();message="Verification email sent again."},Modifier.fillMaxWidth(),enabled=!busy){Text("Resend Verification Email")}}
+            if(waitingForVerification){
+                Button(onClick={activateDemo()},Modifier.fillMaxWidth(),enabled=!busy&&!resendBusy){Text("I Have Verified My Email")}
+                OutlinedButton(
+                    onClick={
+                        val u = auth.currentUser
+                        if (u == null) {
+                            message = "Please sign in to resend the verification email."
+                        } else {
+                            resendBusy = true
+                            message = ""
+                            u.sendEmailVerification().addOnCompleteListener { v ->
+                                resendBusy = false
+                                if (v.isSuccessful) {
+                                    resendCooldown = 30
+                                    message = "Verification email sent again. Check your inbox and spam folder."
+                                } else {
+                                    message = "Verification email could not be sent. ${friendlyAuthError(v.exception)}"
+                                }
+                            }
+                        }
+                    },
+                    Modifier.fillMaxWidth(),
+                    enabled=!busy&&!resendBusy&&resendCooldown==0
+                ){
+                    if (resendBusy) CircularProgressIndicator()
+                    else Text(if (resendCooldown > 0) "Resend in ${resendCooldown}s" else "Resend Verification Email")
+                }
+            }
         } else {
             Text("Demo Already Used", style = MaterialTheme.typography.headlineSmall)
             Text("This device has already been used for a demo. Kindly buy the license.", color = MaterialTheme.colorScheme.error)
@@ -625,7 +755,7 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
             OutlinedTextField(customerName,{customerName=it},Modifier.fillMaxWidth(),label={Text("Your Name")},singleLine=true,enabled=!busy&&!leadSubmitted)
             OutlinedTextField(businessName,{businessName=it},Modifier.fillMaxWidth(),label={Text("Business Name")},singleLine=true,enabled=!busy&&!leadSubmitted)
             OutlinedTextField(email,{email=it},Modifier.fillMaxWidth(),label={Text("Email")},singleLine=true,enabled=!busy&&!leadSubmitted)
-            OutlinedTextField(phone,{phone=it},Modifier.fillMaxWidth(),label={Text("Mobile Number")},singleLine=true,enabled=!busy&&!leadSubmitted)
+            OutlinedTextField(phone,{phone=it.filter(Char::isDigit).take(10)},Modifier.fillMaxWidth(),label={Text("Mobile Number")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone),enabled=!busy&&!leadSubmitted)
             Text("Device ID: $deviceId", style = MaterialTheme.typography.bodySmall)
             if (!leadSubmitted) Button(onClick={submitLead()},Modifier.fillMaxWidth(),enabled=!busy){if(busy)CircularProgressIndicator()else Text("Request Sales Callback")}
             else Text("Lead submitted successfully. Sales Team will contact you.", color = MaterialTheme.colorScheme.primary)
@@ -660,6 +790,19 @@ private fun DeveloperScreen(email: String, onSignOut: () -> Unit) {
             if (task.isSuccessful && task.result?.exists() != true) {
                 val uid = FirebaseAuth.getInstance().currentUser?.uid.orEmpty()
                 leadRef.set(mapOf("statuses" to defaultLeadStatuses(), "updatedAt" to FieldValue.serverTimestamp(), "updatedBy" to uid, "version" to 1L), SetOptions.merge())
+            }
+        }
+    }
+    if (showTenants || showLicenses || showDemoPolicy || showDemoLeads || showDemoReset || showDemoActivations || showLeadPolicy) {
+        BackHandler {
+            when {
+                showTenants -> showTenants = false
+                showLicenses -> showLicenses = false
+                showDemoPolicy -> showDemoPolicy = false
+                showDemoLeads -> showDemoLeads = false
+                showDemoReset -> showDemoReset = false
+                showDemoActivations -> showDemoActivations = false
+                showLeadPolicy -> showLeadPolicy = false
             }
         }
     }
@@ -716,6 +859,7 @@ private fun DeveloperScreen(email: String, onSignOut: () -> Unit) {
 
 @Composable
 private fun TenantAndLicenseCreateScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var clientName by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
@@ -768,7 +912,7 @@ private fun TenantAndLicenseCreateScreen(onBack: () -> Unit, onSignOut: () -> Un
                         val clientId = "CL-%06d".format(Locale.ROOT, next)
                         val licenseId = "LIC-%06d".format(Locale.ROOT, next)
                         val start = Timestamp.now()
-                        val livePolicy = if (licenseType == "DEMO") demoPolicyFrom(tx.get(db.collection("system").document(DEMO_POLICY_DOC))) else null
+                        val livePolicy = if (licenseType == "DEMO") readStrictDemoPolicy(tx.get(db.collection("system").document(DEMO_POLICY_DOC))) else null
                         val finalDays = livePolicy?.durationDays ?: days
                         val finalStaff = livePolicy?.staffLimit ?: staff
                         val finalDevices = livePolicy?.deviceLimit ?: devices
@@ -816,6 +960,7 @@ private fun TenantAndLicenseCreateScreen(onBack: () -> Unit, onSignOut: () -> Un
 
 @Composable
 private fun DemoActivationsScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var items by remember { mutableStateOf<List<DocumentSnapshot>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
@@ -874,6 +1019,7 @@ private fun LeadStatusDropdown(current: String, statuses: List<String>, enabled:
 
 @Composable
 private fun LeadManagementScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var leads by remember { mutableStateOf<List<DocumentSnapshot>>(emptyList()) }
     var statuses by remember { mutableStateOf(defaultLeadStatuses()) }
@@ -954,6 +1100,7 @@ private fun DemoLeadsScreen(onBack: () -> Unit, onSignOut: () -> Unit) = LeadMan
 
 @Composable
 private fun DemoResetScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var deviceId by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
@@ -986,6 +1133,7 @@ private fun DemoResetScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
 
 @Composable
 private fun LeadPolicyScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var statusesText by remember { mutableStateOf(defaultLeadStatuses().joinToString(", ")) }
     var loading by remember { mutableStateOf(true) }
@@ -1029,6 +1177,7 @@ private fun LeadPolicyScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
 
 @Composable
 private fun DemoPolicyScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var durationDays by remember { mutableStateOf(DEFAULT_DEMO_DAYS.toString()) }; var staffLimit by remember { mutableStateOf(DEFAULT_DEMO_STAFF_LIMIT.toString()) }; var deviceLimit by remember { mutableStateOf(DEFAULT_DEMO_DEVICE_LIMIT.toString()) }
     var attendance by remember { mutableStateOf(true) }; var leave by remember { mutableStateOf(true) }; var salary by remember { mutableStateOf(true) }; var payroll by remember { mutableStateOf(true) }; var reports by remember { mutableStateOf(true) }
@@ -1047,6 +1196,7 @@ private fun DemoPolicyScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
 
 @Composable
 private fun LicenseManagementScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var licenses by remember { mutableStateOf<List<LicenseRecord>>(emptyList()) }
     var selected by remember { mutableStateOf<LicenseRecord?>(null) }
@@ -1375,12 +1525,7 @@ private fun leadPolicyFrom(d: DocumentSnapshot): LeadPolicy {
     return LeadPolicy(if (list.contains("NEW")) list else defaultLeadStatuses())
 }
 
-private fun demoPolicyFrom(d: DocumentSnapshot): DemoPolicy = DemoPolicy(
-    durationDays=d.getLong("durationDays") ?: DEFAULT_DEMO_DAYS,
-    staffLimit=d.getLong("staffLimit") ?: DEFAULT_DEMO_STAFF_LIMIT,
-    deviceLimit=d.getLong("deviceLimit") ?: DEFAULT_DEMO_DEVICE_LIMIT,
-    modules=((d.get("modules") as? Map<*, *>)?.mapNotNull { (k,v) -> if(k!=null && v is Boolean) k.toString() to v else null }?.toMap() ?: emptyMap()).let { defaultDemoModules()+it }
-)
+private fun demoPolicyFrom(d: DocumentSnapshot): DemoPolicy = readStrictDemoPolicy(d)
 
 private fun licenseFrom(d: DocumentSnapshot): LicenseRecord = LicenseRecord(
     documentId = d.id, licenseId = d.getString("licenseId") ?: d.id, clientId = d.getString("clientId") ?: "",
