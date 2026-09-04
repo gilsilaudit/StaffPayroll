@@ -1,0 +1,24 @@
+# Paid Customer Activation — v1.1.0
+
+## Final customer flow
+1. Developer/Sales issues a PAID license against the customer's registered email.
+2. Customer opens the app and taps `Activate Purchased License`.
+3. Customer enters the registered email and creates their own password.
+4. Firebase sends an email verification link.
+5. Customer verifies the email and taps `I Have Verified My Email`.
+6. App finds the active PAID license for that email.
+7. App atomically claims the unassigned tenant and creates the customer's first `SUPER_ADMIN` user.
+8. App returns to Sign In; customer signs in with their own email/password.
+9. Existing device/session licensing then applies normally.
+
+## Security
+- Developer/Sales never sets or sees the customer's password.
+- Customer cannot claim a tenant whose account type is DEMO.
+- Customer can claim only an ACTIVE, unassigned PAID tenant whose primary email matches the verified Firebase email.
+- Tenant ownership and first Super Admin creation are performed in one Firestore transaction.
+- Firestore rules validate the paid onboarding path.
+- Existing demo flow remains separate and unchanged.
+
+## Version
+- versionCode: 16
+- versionName: 1.1.0

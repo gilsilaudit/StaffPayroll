@@ -71,11 +71,7 @@ service cloud.firestore {
     }
 
     match /tenants/{tenantId} {
-      // A newly-created self-service demo tenant has no users/{uid} document
-      // yet. The verified owner may read only their own demo tenant.
-      allow read: if isDeveloper()
-        || hasTenantUser(tenantId)
-        || (signedIn() && tenantId == "demo-" + request.auth.uid)
+      allow read: if isDeveloper() || hasTenantUser(tenantId)
         || (signedIn() && resource.data.primaryEmail == request.auth.token.email
             && resource.data.status == "ACTIVE");
 
@@ -98,14 +94,21 @@ service cloud.firestore {
       allow update: if isDeveloper()
         || (
           signedIn()
+          && request.auth.token.email_verified == true
           && resource.data.status == "ACTIVE"
+          && resource.data.accountType == "PAID"
           && resource.data.ownershipStatus == "UNASSIGNED"
+          && resource.data.ownerUid == ""
           && resource.data.primaryEmail == request.auth.token.email
+          && request.resource.data.accountType == "PAID"
           && request.resource.data.ownershipStatus == "ASSIGNED"
           && request.resource.data.ownerUid == request.auth.uid
           && request.resource.data.primaryEmail == resource.data.primaryEmail
           && request.resource.data.clientId == resource.data.clientId
           && request.resource.data.clientName == resource.data.clientName
+          && request.resource.data.activeLicenseId == resource.data.activeLicenseId
+          && request.resource.data.superAdminUids == [request.auth.uid]
+          && request.resource.data.superAdminEmails == [request.auth.token.email]
           && hasActiveLicenseForTenant(tenantId)
         )
         || (
@@ -126,9 +129,7 @@ service cloud.firestore {
 
     match /licenses/{licenseId} {
       allow read: if isDeveloper()
-        || (signedIn() && resource.data.customerEmail == request.auth.token.email)
-        // Demo users need to load their own active license during device/session setup.
-        || (signedIn() && resource.data.tenantId == "demo-" + request.auth.uid);
+        || (signedIn() && resource.data.customerEmail == request.auth.token.email);
       allow create: if isDeveloper()
         || (signedIn()
           && request.auth.token.email_verified == true
@@ -231,15 +232,16 @@ service cloud.firestore {
             && isTenantSuperAdmin(resource.data.tenantId));
 
       // Customer creates their own first user after successfully claiming the tenant.
-      allow create: if isDeveloper()
-        || (ownUser(uid)
-          && request.auth.token.email_verified == true
-          && request.resource.data.uid == request.auth.uid
-          && request.resource.data.email == request.auth.token.email
-          && request.resource.data.tenantId == "demo-" + request.auth.uid
-          && request.resource.data.accountType == "DEMO"
-          && request.resource.data.role == "SUPER_ADMIN"
-          && request.resource.data.status == "ACTIVE");
+      allow create: if ownUser(uid)
+        && request.auth.token.email_verified == true
+        && request.resource.data.role == "SUPER_ADMIN"
+        && request.resource.data.status == "ACTIVE"
+        && request.resource.data.accountType in ["PAID", "DEMO"]
+        && request.resource.data.tenantId != null
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.email == request.auth.token.email
+        && getAfter(/databases/$(database)/documents/tenants/$(request.resource.data.tenantId)).data.ownerUid == request.auth.uid
+        && getAfter(/databases/$(database)/documents/tenants/$(request.resource.data.tenantId)).data.ownershipStatus == "ASSIGNED";
 
       // Super Admin may manage user metadata for their own tenant. Role changes are
       // deliberately constrained to known application roles.
