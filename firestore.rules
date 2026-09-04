@@ -229,12 +229,15 @@ service cloud.firestore {
             && isTenantSuperAdmin(resource.data.tenantId));
 
       // Customer creates their own first user after successfully claiming the tenant.
-      allow create: if ownUser(uid)
-        && request.resource.data.role == "SUPER_ADMIN"
-        && request.resource.data.status == "ACTIVE"
-        && request.resource.data.tenantId != null
-        && getAfter(/databases/$(database)/documents/tenants/$(request.resource.data.tenantId)).data.ownerUid == request.auth.uid
-        && request.resource.data.uid == request.auth.uid;
+      allow create: if isDeveloper()
+        || (ownUser(uid)
+          && request.auth.token.email_verified == true
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.email == request.auth.token.email
+          && request.resource.data.tenantId == "demo-" + request.auth.uid
+          && request.resource.data.accountType == "DEMO"
+          && request.resource.data.role == "SUPER_ADMIN"
+          && request.resource.data.status == "ACTIVE");
 
       // Super Admin may manage user metadata for their own tenant. Role changes are
       // deliberately constrained to known application roles.
