@@ -521,6 +521,7 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
                     "email" to mail,
                     "phone" to phone.trim(),
                     "deviceId" to deviceId,
+                    "tenantId" to "demo-${auth.currentUser?.uid.orEmpty()}",
                     "leadType" to "DEMO_BLOCKED",
                     "source" to "SELF_SERVICE_DEMO_BLOCKED",
                     "reason" to "DEVICE_DEMO_ALREADY_USED",
