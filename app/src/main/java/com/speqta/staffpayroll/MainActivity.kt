@@ -1471,51 +1471,145 @@ private fun getStableDeviceId(context: Context): String {
 
 private fun ensureDeviceAndSession(context: Context, user: UserRecord, done: (Boolean, String, String, String) -> Unit) {
     val db = FirebaseFirestore.getInstance()
-    val prefs = context.getSharedPreferences("staff_payroll_identity", Context.MODE_PRIVATE)
     val did = getStableDeviceId(context)
-    val deviceRef = db.collection("devices").document(did)
-    db.collection("sessions").whereEqualTo("uid", user.uid).whereEqualTo("status", "ACTIVE").get().addOnCompleteListener { activeTask ->
-        if (!activeTask.isSuccessful) { done(false, "", did, firestoreFriendlyError(activeTask.exception)); return@addOnCompleteListener }
-        val other = activeTask.result?.documents?.firstOrNull { it.getString("deviceId") != did }
-        if (other != null) { done(false, "", did, "This staff/admin account is already active on another device. Ask the customer Super Admin to Force Logout the old session."); return@addOnCompleteListener }
-        deviceRef.get().addOnCompleteListener { deviceTask ->
-            if (!deviceTask.isSuccessful) { done(false, "", did, firestoreFriendlyError(deviceTask.exception)); return@addOnCompleteListener }
-            val existing = deviceTask.result
+
+    // IMPORTANT: do not call get() on a possibly non-existent /devices/{id} document.
+    // The device read rule is based on document fields (uid), so a missing document
+    // cannot satisfy that rule. Querying by uid + deviceId is both secure and works
+    // for the first registration when no device document exists yet.
+    db.collection("sessions")
+        .whereEqualTo("uid", user.uid)
+        .whereEqualTo("status", "ACTIVE")
+        .get()
+        .addOnCompleteListener { activeTask ->
+            if (!activeTask.isSuccessful) {
+                done(false, "", did, firestoreFriendlyError(activeTask.exception))
+                return@addOnCompleteListener
+            }
+
+            val other = activeTask.result?.documents?.firstOrNull { it.getString("deviceId") != did }
+            if (other != null) {
+                done(false, "", did, "This staff/admin account is already active on another device. Ask the customer Super Admin to Force Logout the old session.")
+                return@addOnCompleteListener
+            }
+
             val proceedWithDevice: () -> Unit = {
                 val existingSession = activeTask.result?.documents?.firstOrNull { it.getString("deviceId") == did }
                 if (existingSession != null) {
                     val sid = existingSession.id
-                    db.collection("sessions").document(sid).update("lastSeenAt", FieldValue.serverTimestamp()).addOnCompleteListener { t ->
-                        done(t.isSuccessful, sid, did, if (t.isSuccessful) "" else firestoreFriendlyError(t.exception))
-                    }
+                    db.collection("sessions").document(sid).update("lastSeenAt", FieldValue.serverTimestamp())
+                        .addOnCompleteListener { t ->
+                            done(t.isSuccessful, sid, did, if (t.isSuccessful) "" else firestoreFriendlyError(t.exception))
+                        }
                 } else {
                     val sessionRef = db.collection("sessions").document("SES-${UUID.randomUUID()}")
                     sessionRef.set(mapOf(
-                        "sessionId" to sessionRef.id, "tenantId" to user.tenantId, "uid" to user.uid, "staffId" to user.staffId,
-                        "deviceId" to did, "loginAt" to FieldValue.serverTimestamp(), "lastSeenAt" to FieldValue.serverTimestamp(), "status" to "ACTIVE"
-                    )).addOnCompleteListener { t -> done(t.isSuccessful, if (t.isSuccessful) sessionRef.id else "", did, if (t.isSuccessful) "" else firestoreFriendlyError(t.exception)) }
+                        "sessionId" to sessionRef.id,
+                        "tenantId" to user.tenantId,
+                        "uid" to user.uid,
+                        "staffId" to user.staffId,
+                        "deviceId" to did,
+                        "loginAt" to FieldValue.serverTimestamp(),
+                        "lastSeenAt" to FieldValue.serverTimestamp(),
+                        "status" to "ACTIVE"
+                    )).addOnCompleteListener { t ->
+                        done(t.isSuccessful, if (t.isSuccessful) sessionRef.id else "", did,
+                            if (t.isSuccessful) "" else firestoreFriendlyError(t.exception))
+                    }
                 }
             }
-            if (existing != null && existing.exists()) { proceedWithDevice(); return@addOnCompleteListener }
-            db.collection("licenses").whereEqualTo("tenantId", user.tenantId).whereEqualTo("status", "ACTIVE").whereGreaterThanOrEqualTo("validUntil", Timestamp.now()).limit(1).get().addOnCompleteListener { licTask ->
-                val lic = licTask.result?.documents?.firstOrNull()?.let { licenseFrom(it) }
-                if (lic == null) { done(false, "", did, "No active license was found."); return@addOnCompleteListener }
-                val maxSlots = minOf(lic.deviceLimit, 100L).toInt()
-                val slotIds = (1..maxSlots).map { "${user.tenantId}_$it" }
-                db.collection("deviceSlots").whereEqualTo("tenantId", user.tenantId).whereEqualTo("status", "ACTIVE").get().addOnCompleteListener { slotsTask ->
-                    if (!slotsTask.isSuccessful) { done(false, "", did, firestoreFriendlyError(slotsTask.exception)); return@addOnCompleteListener }
-                    val used = slotsTask.result?.documents?.mapNotNull { it.getLong("slotNumber")?.toInt() }?.toSet() ?: emptySet()
-                    val freeSlot = (1..maxSlots).firstOrNull { it !in used }
-                    if (freeSlot == null) { done(false, "", did, "Device limit reached (${lic.deviceLimit}). Ask the Super Admin to revoke an old device or the License Team to increase the limit."); return@addOnCompleteListener }
-                    val slotRef = db.collection("deviceSlots").document("${user.tenantId}_$freeSlot")
-                    val batch = db.batch()
-                    batch.set(deviceRef, mapOf("deviceId" to did, "tenantId" to user.tenantId, "uid" to user.uid, "staffId" to user.staffId, "status" to "ACTIVE", "deviceName" to android.os.Build.MODEL, "platform" to "Android", "slotNumber" to freeSlot, "licenseId" to lic.documentId, "registeredAt" to FieldValue.serverTimestamp(), "lastSeenAt" to FieldValue.serverTimestamp()), SetOptions.merge())
-                    batch.set(slotRef, mapOf("tenantId" to user.tenantId, "slotNumber" to freeSlot, "deviceId" to did, "status" to "ACTIVE", "uid" to user.uid, "staffId" to user.staffId, "licenseId" to lic.documentId, "updatedAt" to FieldValue.serverTimestamp()), SetOptions.merge())
-                    batch.commit().addOnCompleteListener { t -> if (t.isSuccessful) proceedWithDevice() else done(false, "", did, firestoreFriendlyError(t.exception)) }
+
+            // Secure first-registration lookup: the query is provably allowed by
+            // /devices read rule because it constrains uid to the signed-in user.
+            db.collection("devices")
+                .whereEqualTo("uid", user.uid)
+                .whereEqualTo("deviceId", did)
+                .limit(1)
+                .get()
+                .addOnCompleteListener { deviceTask ->
+                    if (!deviceTask.isSuccessful) {
+                        done(false, "", did, firestoreFriendlyError(deviceTask.exception))
+                        return@addOnCompleteListener
+                    }
+
+                    val existing = deviceTask.result?.documents?.firstOrNull()
+                    if (existing != null) {
+                        proceedWithDevice()
+                        return@addOnCompleteListener
+                    }
+
+                    // No device record yet. Find an active license and allocate a slot.
+                    db.collection("licenses")
+                        .whereEqualTo("tenantId", user.tenantId)
+                        .whereEqualTo("status", "ACTIVE")
+                        .whereGreaterThanOrEqualTo("validUntil", Timestamp.now())
+                        .limit(1)
+                        .get()
+                        .addOnCompleteListener { licTask ->
+                            if (!licTask.isSuccessful) {
+                                done(false, "", did, firestoreFriendlyError(licTask.exception))
+                                return@addOnCompleteListener
+                            }
+                            val lic = licTask.result?.documents?.firstOrNull()?.let { licenseFrom(it) }
+                            if (lic == null) {
+                                done(false, "", did, "No active license was found.")
+                                return@addOnCompleteListener
+                            }
+
+                            val maxSlots = minOf(lic.deviceLimit, 100L).toInt()
+                            val used = db.collection("deviceSlots")
+                                .whereEqualTo("tenantId", user.tenantId)
+                                .whereEqualTo("status", "ACTIVE")
+                                .get()
+
+                            used.addOnCompleteListener { slotsTask ->
+                                if (!slotsTask.isSuccessful) {
+                                    done(false, "", did, firestoreFriendlyError(slotsTask.exception))
+                                    return@addOnCompleteListener
+                                }
+                                val usedNumbers = slotsTask.result?.documents
+                                    ?.mapNotNull { it.getLong("slotNumber")?.toInt() }
+                                    ?.toSet() ?: emptySet()
+                                val freeSlot = (1..maxSlots).firstOrNull { it !in usedNumbers }
+                                if (freeSlot == null) {
+                                    done(false, "", did, "Device limit reached (${lic.deviceLimit}). Ask the Super Admin to revoke an old device or the License Team to increase the limit.")
+                                    return@addOnCompleteListener
+                                }
+
+                                val deviceRef = db.collection("devices").document(did)
+                                val slotRef = db.collection("deviceSlots").document("${user.tenantId}_$freeSlot")
+                                val batch = db.batch()
+                                batch.set(deviceRef, mapOf(
+                                    "deviceId" to did,
+                                    "tenantId" to user.tenantId,
+                                    "uid" to user.uid,
+                                    "staffId" to user.staffId,
+                                    "status" to "ACTIVE",
+                                    "deviceName" to android.os.Build.MODEL,
+                                    "platform" to "Android",
+                                    "slotNumber" to freeSlot,
+                                    "licenseId" to lic.documentId,
+                                    "registeredAt" to FieldValue.serverTimestamp(),
+                                    "lastSeenAt" to FieldValue.serverTimestamp()
+                                ), SetOptions.merge())
+                                batch.set(slotRef, mapOf(
+                                    "tenantId" to user.tenantId,
+                                    "slotNumber" to freeSlot,
+                                    "deviceId" to did,
+                                    "status" to "ACTIVE",
+                                    "uid" to user.uid,
+                                    "staffId" to user.staffId,
+                                    "licenseId" to lic.documentId,
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                ), SetOptions.merge())
+                                batch.commit().addOnCompleteListener { t ->
+                                    if (t.isSuccessful) proceedWithDevice()
+                                    else done(false, "", did, firestoreFriendlyError(t.exception))
+                                }
+                            }
+                        }
                 }
-            }
         }
-    }
 }
 
 private fun authIsVerified(user: FirebaseUser): Boolean = user.isEmailVerified
