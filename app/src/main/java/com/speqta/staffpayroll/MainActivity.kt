@@ -1443,9 +1443,14 @@ private fun CustomerSuperAdminScreen(user: UserRecord, deviceId: String, session
         if (loading) CircularProgressIndicator()
         tenant?.let { ten ->
             Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) {
-                Text("${ten.clientId} — ${ten.clientName}", style = MaterialTheme.typography.titleLarge)
-                Text("Tenant ownership: ${ten.ownershipStatus}")
-                Text("Super Admins: ${ten.superAdminEmails.joinToString(", ")}")
+                Text(if (ten.clientId.startsWith("DEMO-")) "Demo Account" else ten.clientName.ifBlank { "Customer Account" }, style = MaterialTheme.typography.titleLarge)
+                if (ten.clientId.startsWith("DEMO-")) {
+                    Text("Your demo account is active", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else if (ten.clientName.isNotBlank()) {
+                    Text(ten.clientName, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.height(4.dp))
+                Text("Account owner: ${user.email}", style = MaterialTheme.typography.bodyMedium)
             }}
         }
         license?.let { lic ->
@@ -1461,20 +1466,22 @@ private fun CustomerSuperAdminScreen(user: UserRecord, deviceId: String, session
             Text("Device / Session Management", style = MaterialTheme.typography.titleLarge)
             Text("You can remotely revoke a Staff/Admin session. Developer intervention is not required.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
-            devices.forEach { d ->
+            devices.forEachIndexed { index, d ->
                 val activeSession = sessions.firstOrNull { it.deviceId == d.id && it.status == "ACTIVE" }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("${d.staffId} — ${d.deviceName}")
-                        Text("${d.status} | ${d.platform}", style = MaterialTheme.typography.bodySmall)
+                        val deviceLabel = if (d.id == deviceId) "This device" else "Device ${index + 1}"
+                        Text(deviceLabel, style = MaterialTheme.typography.titleMedium)
+                        Text("${d.platform} • ${d.deviceName}", style = MaterialTheme.typography.bodySmall)
+                        Text(if (d.status == "ACTIVE") "Active" else "Revoked", style = MaterialTheme.typography.bodySmall)
                     }
-                    if (activeSession != null) {
+                    if (activeSession != null && d.id != deviceId) {
                         OutlinedButton(onClick = {
                             val batch = db.batch()
                             batch.update(db.collection("sessions").document(activeSession.id), mapOf("status" to "REVOKED", "revokedAt" to FieldValue.serverTimestamp(), "revokedBy" to user.uid, "logoutReason" to "REMOTE_LOGOUT"))
                             batch.update(db.collection("devices").document(d.id), mapOf("status" to "REVOKED", "revokedAt" to FieldValue.serverTimestamp(), "revokedBy" to user.uid))
                             if (d.slotNumber > 0) batch.update(db.collection("deviceSlots").document("${user.tenantId}_${d.slotNumber}"), mapOf("status" to "REVOKED", "updatedAt" to FieldValue.serverTimestamp(), "revokedBy" to user.uid))
-                            batch.commit().addOnCompleteListener { task -> message = if (task.isSuccessful) "Remote logout completed for ${d.staffId}. Device slot released." else firestoreFriendlyError(task.exception); load() }
+                            batch.commit().addOnCompleteListener { task -> message = if (task.isSuccessful) "Remote logout completed. The device slot has been released." else firestoreFriendlyError(task.exception); load() }
                         }) { Text("Force Logout") }
                     }
                 }
@@ -1484,7 +1491,10 @@ private fun CustomerSuperAdminScreen(user: UserRecord, deviceId: String, session
         }}
         if (message.isNotBlank()) Text(message, color = if (message.contains("completed")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
         OutlinedButton(onClick = onSignOut, Modifier.fillMaxWidth()) { Text("Sign out") }
-        Text("Current device: $deviceId | Session: $sessionId", style = MaterialTheme.typography.bodySmall)
+        Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) {
+            Text("Current access", style = MaterialTheme.typography.titleMedium)
+            Text("This device is connected and your session is active.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }}
     }
 }
 
@@ -1493,10 +1503,11 @@ private fun SimpleRoleScreen(title: String, user: UserRecord, deviceId: String, 
     Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Text(title, style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(8.dp)); Text(user.displayName.ifBlank { user.email })
-        Spacer(Modifier.height(8.dp)); Text("Staff ID: ${user.staffId}")
-        Spacer(Modifier.height(8.dp)); Text("Tenant: ${user.tenantId}", style = MaterialTheme.typography.bodySmall)
+        if (user.staffId.isNotBlank()) {
+            Spacer(Modifier.height(8.dp)); Text("Staff ID: ${user.staffId}")
+        }
         Spacer(Modifier.height(20.dp)); OutlinedButton(onClick = onSignOut, Modifier.fillMaxWidth()) { Text("Sign out") }
-        Spacer(Modifier.height(12.dp)); Text("Device: $deviceId\nSession: $sessionId", style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(12.dp)); Text("This device • Session active", style = MaterialTheme.typography.bodySmall)
     }
 }
 
