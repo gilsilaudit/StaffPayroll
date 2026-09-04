@@ -620,7 +620,7 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
                                     "licenseId" to licenseId, "clientId" to clientId, "tenantId" to tenantId,
                                     "customerEmail" to mail, "customerName" to customerName.trim(), "customerPhone" to phone.trim(),
                                     "licenseType" to "DEMO", "status" to "ACTIVE", "validFrom" to now, "validUntil" to endTs,
-                                    "staffLimit" to p.staffLimit, "deviceLimit" to p.deviceLimit, "modules" to p.modules,
+                                    "staffLimit" to p.staffLimit, "deviceLimit" to p.deviceLimit, "modules" to p.modules, "deviceId" to deviceId,
                                     "issuedAt" to now, "issuedBy" to if (activationCount == 1L) "SELF_SERVICE_DEMO" else "SALES_RESET_SELF_SERVICE",
                                     "createdAt" to now, "updatedAt" to now, "version" to 1L, "demoActivationNumber" to activationCount
                                 ))
