@@ -323,7 +323,9 @@ private fun LoginScreen(auth: FirebaseAuth, onSignedIn: () -> Unit, onSignedUp: 
     var demoPolicyLoading by remember { mutableStateOf(true) }
     var demoPolicyError by remember { mutableStateOf("") }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(showDemo) {
+        // Always refresh the public Demo Policy whenever the login screen becomes
+        // visible again. The customer-facing offer must never be a hard-coded value.
         demoPolicyLoading = true
         demoPolicyError = ""
         FirebaseFirestore.getInstance().collection("system").document(DEMO_POLICY_DOC).get()
@@ -392,7 +394,7 @@ private fun LoginScreen(auth: FirebaseAuth, onSignedIn: () -> Unit, onSignedUp: 
             enabled = !busy && !demoPolicyLoading && demoPolicy != null
         ) {
             if (demoPolicyLoading) CircularProgressIndicator()
-            else Text("Start ${demoPolicy?.durationDays ?: ""}-Day Free Demo")
+            else Text("Start ${demoPolicy!!.durationDays}-Day Free Demo")
         }
         if (demoPolicyError.isNotBlank()) {
             Spacer(Modifier.height(4.dp))
@@ -1321,6 +1323,9 @@ private fun LicenseManagementScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
 
 @Composable
 private fun CustomerOnboardingScreen(user: FirebaseUser, onSignOut: () -> Unit) {
+    // Onboarding is a child flow of sign-in. Android system Back and edge-swipe
+    // should return the customer to the sign-in screen instead of doing nothing.
+    BackHandler { onSignOut() }
     val db = remember { FirebaseFirestore.getInstance() }
     var license by remember { mutableStateOf<LicenseRecord?>(null) }
     var tenant by remember { mutableStateOf<TenantRecord?>(null) }
@@ -1334,9 +1339,15 @@ private fun CustomerOnboardingScreen(user: FirebaseUser, onSignOut: () -> Unit) 
             if (!reloadTask.isSuccessful) { loading = false; message = friendlyAuthError(reloadTask.exception); return@addOnCompleteListener }
             if (authIsVerified(user).not()) { loading = false; message = "Please verify your email address first, then sign in again."; return@addOnCompleteListener }
             val email = user.email?.trim()?.lowercase(Locale.ROOT).orEmpty()
-            db.collection("licenses").whereEqualTo("customerEmail", email).whereEqualTo("status", "ACTIVE").whereGreaterThanOrEqualTo("validUntil", Timestamp.now()).limit(1).get().addOnCompleteListener { task ->
+            // Query only by customerEmail. Status/validity are verified locally so first-time
+            // paid onboarding does not depend on a Firestore composite index.
+            db.collection("licenses").whereEqualTo("customerEmail", email).limit(20).get().addOnCompleteListener { task ->
             if (!task.isSuccessful) { loading = false; message = firestoreFriendlyError(task.exception); return@addOnCompleteListener }
-            val doc = task.result?.documents?.firstOrNull()
+            val now = Timestamp.now()
+            val doc = task.result?.documents?.firstOrNull { d ->
+                d.getString("status") == "ACTIVE" &&
+                    (d.getTimestamp("validUntil")?.toDate()?.after(now.toDate()) == true)
+            }
             if (doc == null) {
                 loading = false
                 message = if (user.isEmailVerified) {
@@ -1376,30 +1387,47 @@ private fun CustomerOnboardingScreen(user: FirebaseUser, onSignOut: () -> Unit) 
                 if (name.trim().isBlank()) { message = "Your name is required."; return@Button }
                 saving = true; message = ""
                 val tenantRef = db.collection("tenants").document(lic.tenantId)
+                val userRef = db.collection("users").document(user.uid)
+                // Claim the tenant and create the first Super Admin atomically. This
+                // prevents a partial state where the tenant becomes ASSIGNED but the
+                // user document fails, which would otherwise block retrying onboarding.
                 db.runTransaction { tx ->
                     val snap = tx.get(tenantRef)
                     val owner = snap.getString("ownerUid").orEmpty()
                     val ownership = snap.getString("ownershipStatus") ?: "UNASSIGNED"
-                    if (ownership != "UNASSIGNED" || owner.isNotBlank()) throw IllegalStateException("This license has already been claimed by another account.")
+                    if (ownership != "UNASSIGNED" || owner.isNotBlank()) {
+                        throw IllegalStateException("This license has already been claimed by another account.")
+                    }
                     val nextStaff = snap.getLong("nextStaffNumber") ?: 1L
                     val staffId = "ST-%06d".format(Locale.ROOT, nextStaff)
                     tx.update(tenantRef, mapOf(
-                        "ownerUid" to user.uid, "ownershipStatus" to "ASSIGNED",
+                        "ownerUid" to user.uid,
+                        "ownershipStatus" to "ASSIGNED",
                         "superAdminUids" to FieldValue.arrayUnion(user.uid),
                         "superAdminEmails" to FieldValue.arrayUnion(user.email?.lowercase(Locale.ROOT).orEmpty()),
-                        "nextStaffNumber" to nextStaff + 1L, "updatedAt" to FieldValue.serverTimestamp()
+                        "nextStaffNumber" to nextStaff + 1L,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ))
+                    tx.set(userRef, mapOf(
+                        "uid" to user.uid,
+                        "email" to user.email?.lowercase(Locale.ROOT).orEmpty(),
+                        "tenantId" to lic.tenantId,
+                        "accountType" to lic.licenseType,
+                        "role" to "SUPER_ADMIN",
+                        "status" to "ACTIVE",
+                        "staffId" to staffId,
+                        "displayName" to name.trim(),
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
                     ))
                     staffId
                 }.addOnCompleteListener { task ->
-                    if (!task.isSuccessful) { saving = false; message = task.exception?.message ?: "Unable to complete onboarding."; return@addOnCompleteListener }
-                    val staffId = task.result ?: "ST-000001"
-                    db.collection("users").document(user.uid).set(mapOf(
-                        "uid" to user.uid, "email" to user.email?.lowercase(Locale.ROOT).orEmpty(), "tenantId" to lic.tenantId,
-                        "role" to "SUPER_ADMIN", "status" to "ACTIVE", "staffId" to staffId,
-                        "displayName" to name.trim(), "createdAt" to FieldValue.serverTimestamp(), "updatedAt" to FieldValue.serverTimestamp()
-                    )).addOnCompleteListener { userTask ->
-                        saving = false
-                        if (userTask.isSuccessful) { message = "Onboarding complete. Please sign in again to continue."; onSignOut() } else message = firestoreFriendlyError(userTask.exception)
+                    saving = false
+                    if (task.isSuccessful) {
+                        message = "Onboarding complete. Please sign in again to continue."
+                        onSignOut()
+                    } else {
+                        message = firestoreFriendlyError(task.exception)
                     }
                 }
             }, Modifier.fillMaxWidth(), enabled = !saving) { if (saving) CircularProgressIndicator() else Text("Complete Onboarding") }
@@ -1424,7 +1452,17 @@ private fun CustomerSuperAdminScreen(user: UserRecord, deviceId: String, session
             if (!t.isSuccessful || t.result == null || !t.result!!.exists()) { loading = false; message = firestoreFriendlyError(t.exception); return@addOnCompleteListener }
             val ten = tenantFrom(t.result!!); tenant = ten
             db.collection("licenses").document(ten.activeLicenseId).get().addOnCompleteListener { l ->
-                license = if (l.isSuccessful && l.result?.exists() == true) licenseFrom(l.result!!) else null
+                if (!l.isSuccessful) {
+                    loading = false
+                    message = firestoreFriendlyError(l.exception)
+                    return@addOnCompleteListener
+                }
+                if (l.result?.exists() != true) {
+                    loading = false
+                    message = "Unable to access licensing data. The active license record was not found."
+                    return@addOnCompleteListener
+                }
+                license = licenseFrom(l.result!!)
                 db.collection("devices").whereEqualTo("tenantId", user.tenantId).get().addOnCompleteListener { d ->
                     devices = if (d.isSuccessful) d.result?.documents?.map { deviceFrom(it) } ?: emptyList() else emptyList()
                     db.collection("sessions").whereEqualTo("tenantId", user.tenantId).whereEqualTo("status", "ACTIVE").get().addOnCompleteListener { s ->
@@ -1443,9 +1481,14 @@ private fun CustomerSuperAdminScreen(user: UserRecord, deviceId: String, session
         if (loading) CircularProgressIndicator()
         tenant?.let { ten ->
             Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) {
-                Text("${ten.clientId} — ${ten.clientName}", style = MaterialTheme.typography.titleLarge)
-                Text("Tenant ownership: ${ten.ownershipStatus}")
-                Text("Super Admins: ${ten.superAdminEmails.joinToString(", ")}")
+                Text(if (ten.clientId.startsWith("DEMO-")) "Demo Account" else ten.clientName.ifBlank { "Customer Account" }, style = MaterialTheme.typography.titleLarge)
+                if (ten.clientId.startsWith("DEMO-")) {
+                    Text("Your demo account is active", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else if (ten.clientName.isNotBlank()) {
+                    Text(ten.clientName, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.height(4.dp))
+                Text("Account owner: ${user.email}", style = MaterialTheme.typography.bodyMedium)
             }}
         }
         license?.let { lic ->
@@ -1461,20 +1504,22 @@ private fun CustomerSuperAdminScreen(user: UserRecord, deviceId: String, session
             Text("Device / Session Management", style = MaterialTheme.typography.titleLarge)
             Text("You can remotely revoke a Staff/Admin session. Developer intervention is not required.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
-            devices.forEach { d ->
+            devices.forEachIndexed { index, d ->
                 val activeSession = sessions.firstOrNull { it.deviceId == d.id && it.status == "ACTIVE" }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("${d.staffId} — ${d.deviceName}")
-                        Text("${d.status} | ${d.platform}", style = MaterialTheme.typography.bodySmall)
+                        val deviceLabel = if (d.id == deviceId) "This device" else "Device ${index + 1}"
+                        Text(deviceLabel, style = MaterialTheme.typography.titleMedium)
+                        Text("${d.platform} • ${d.deviceName}", style = MaterialTheme.typography.bodySmall)
+                        Text(if (d.status == "ACTIVE") "Active" else "Revoked", style = MaterialTheme.typography.bodySmall)
                     }
-                    if (activeSession != null) {
+                    if (activeSession != null && d.id != deviceId) {
                         OutlinedButton(onClick = {
                             val batch = db.batch()
                             batch.update(db.collection("sessions").document(activeSession.id), mapOf("status" to "REVOKED", "revokedAt" to FieldValue.serverTimestamp(), "revokedBy" to user.uid, "logoutReason" to "REMOTE_LOGOUT"))
                             batch.update(db.collection("devices").document(d.id), mapOf("status" to "REVOKED", "revokedAt" to FieldValue.serverTimestamp(), "revokedBy" to user.uid))
                             if (d.slotNumber > 0) batch.update(db.collection("deviceSlots").document("${user.tenantId}_${d.slotNumber}"), mapOf("status" to "REVOKED", "updatedAt" to FieldValue.serverTimestamp(), "revokedBy" to user.uid))
-                            batch.commit().addOnCompleteListener { task -> message = if (task.isSuccessful) "Remote logout completed for ${d.staffId}. Device slot released." else firestoreFriendlyError(task.exception); load() }
+                            batch.commit().addOnCompleteListener { task -> message = if (task.isSuccessful) "Remote logout completed. The device slot has been released." else firestoreFriendlyError(task.exception); load() }
                         }) { Text("Force Logout") }
                     }
                 }
@@ -1484,7 +1529,10 @@ private fun CustomerSuperAdminScreen(user: UserRecord, deviceId: String, session
         }}
         if (message.isNotBlank()) Text(message, color = if (message.contains("completed")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
         OutlinedButton(onClick = onSignOut, Modifier.fillMaxWidth()) { Text("Sign out") }
-        Text("Current device: $deviceId | Session: $sessionId", style = MaterialTheme.typography.bodySmall)
+        Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) {
+            Text("Current access", style = MaterialTheme.typography.titleMedium)
+            Text("This device is connected and your session is active.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }}
     }
 }
 
@@ -1493,10 +1541,11 @@ private fun SimpleRoleScreen(title: String, user: UserRecord, deviceId: String, 
     Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Text(title, style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(8.dp)); Text(user.displayName.ifBlank { user.email })
-        Spacer(Modifier.height(8.dp)); Text("Staff ID: ${user.staffId}")
-        Spacer(Modifier.height(8.dp)); Text("Tenant: ${user.tenantId}", style = MaterialTheme.typography.bodySmall)
+        if (user.staffId.isNotBlank()) {
+            Spacer(Modifier.height(8.dp)); Text("Staff ID: ${user.staffId}")
+        }
         Spacer(Modifier.height(20.dp)); OutlinedButton(onClick = onSignOut, Modifier.fillMaxWidth()) { Text("Sign out") }
-        Spacer(Modifier.height(12.dp)); Text("Device: $deviceId\nSession: $sessionId", style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(12.dp)); Text("This device • Session active", style = MaterialTheme.typography.bodySmall)
     }
 }
 

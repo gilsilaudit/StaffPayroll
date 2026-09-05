@@ -230,16 +230,30 @@ service cloud.firestore {
         || (signedIn() && resource.data.tenantId != null && hasTenantUser(resource.data.tenantId)
             && isTenantSuperAdmin(resource.data.tenantId));
 
-      // Customer creates their own first user after successfully claiming the tenant.
+      // Customer creates their own first Super Admin record after claiming a
+      // licensed tenant. This supports both PAID customer activation and DEMO
+      // activation while keeping the write strictly tied to the signed-in account.
       allow create: if isDeveloper()
         || (ownUser(uid)
           && request.auth.token.email_verified == true
           && request.resource.data.uid == request.auth.uid
           && request.resource.data.email == request.auth.token.email
-          && request.resource.data.tenantId == "demo-" + request.auth.uid
-          && request.resource.data.accountType == "DEMO"
+          && request.resource.data.tenantId != null
+          && request.resource.data.accountType in ["PAID", "DEMO"]
           && request.resource.data.role == "SUPER_ADMIN"
-          && request.resource.data.status == "ACTIVE");
+          && request.resource.data.status == "ACTIVE"
+          && (
+            (request.resource.data.accountType == "DEMO"
+              && request.resource.data.tenantId == "demo-" + request.auth.uid)
+            ||
+            (request.resource.data.accountType == "PAID"
+              && exists(/databases/$(database)/documents/tenants/$(request.resource.data.tenantId))
+              && getAfter(/databases/$(database)/documents/tenants/$(request.resource.data.tenantId)).data.status == "ACTIVE"
+              && getAfter(/databases/$(database)/documents/tenants/$(request.resource.data.tenantId)).data.ownershipStatus == "ASSIGNED"
+              && getAfter(/databases/$(database)/documents/tenants/$(request.resource.data.tenantId)).data.ownerUid == request.auth.uid
+              && getAfter(/databases/$(database)/documents/tenants/$(request.resource.data.tenantId)).data.primaryEmail == request.auth.token.email
+              && hasActiveLicenseForTenant(request.resource.data.tenantId))
+          ));
 
       // Super Admin may manage user metadata for their own tenant. Role changes are
       // deliberately constrained to known application roles.
