@@ -1625,20 +1625,31 @@ private fun ensureDeviceAndSession(context: Context, user: UserRecord, done: (Bo
                     }
 
                     // No device record yet. Find an active license and allocate a slot.
+                    // IMPORTANT: /licenses read access for customers is authorized by
+                    // customerEmail. Querying by tenantId/status/validUntil is not
+                    // provably authorized by the Firestore rules and causes
+                    // PERMISSION_DENIED for paid customers. Query by authenticated email
+                    // and validate tenant/status/expiry locally.
                     db.collection("licenses")
-                        .whereEqualTo("tenantId", user.tenantId)
+                        .whereEqualTo("customerEmail", user.email.trim().lowercase(Locale.ROOT))
                         .whereEqualTo("status", "ACTIVE")
-                        .whereGreaterThanOrEqualTo("validUntil", Timestamp.now())
-                        .limit(1)
+                        .limit(20)
                         .get()
                         .addOnCompleteListener { licTask ->
                             if (!licTask.isSuccessful) {
                                 done(false, "", did, firestoreFriendlyError(licTask.exception))
                                 return@addOnCompleteListener
                             }
-                            val lic = licTask.result?.documents?.firstOrNull()?.let { licenseFrom(it) }
+                            val now = Timestamp.now()
+                            val lic = licTask.result?.documents
+                                ?.firstOrNull { d ->
+                                    d.getString("tenantId") == user.tenantId &&
+                                        d.getString("status") == "ACTIVE" &&
+                                        (d.getTimestamp("validUntil")?.toDate()?.after(now.toDate()) == true)
+                                }
+                                ?.let { licenseFrom(it) }
                             if (lic == null) {
-                                done(false, "", did, "No active license was found.")
+                                done(false, "", did, "No active license was found for this customer tenant.")
                                 return@addOnCompleteListener
                             }
 
