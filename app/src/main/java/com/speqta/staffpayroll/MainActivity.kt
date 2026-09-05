@@ -1670,27 +1670,25 @@ private fun ensureDeviceAndSession(context: Context, user: UserRecord, done: (Bo
                                     }
 
                             val maxSlots = minOf(lic.deviceLimit, 100L).toInt()
-                            val used = db.collection("deviceSlots")
-                                .whereEqualTo("tenantId", user.tenantId)
-                                .whereEqualTo("status", "ACTIVE")
-                                .get()
 
-                            used.addOnCompleteListener { slotsTask ->
-                                if (!slotsTask.isSuccessful) {
-                                    done(false, "", did, firestoreFriendlyError(slotsTask.exception))
-                                    return@addOnCompleteListener
-                                }
-                                val usedNumbers = slotsTask.result?.documents
-                                    ?.mapNotNull { it.getLong("slotNumber")?.toInt() }
-                                    ?.toSet() ?: emptySet()
-                                val freeSlot = (1..maxSlots).firstOrNull { it !in usedNumbers }
-                                if (freeSlot == null) {
+                            // Do NOT query deviceSlots here. Normal customer users are
+                            // intentionally allowed to read only their own slot, while
+                            // the Super Admin may read the tenant's slots. A tenant-wide
+                            // deviceSlots query therefore cannot be proven safe by the
+                            // Firestore rules and can fail with PERMISSION_DENIED.
+                            //
+                            // Instead, allocation is performed by optimistic writes against
+                            // deterministic slot documents. If a slot is already occupied,
+                            // Firestore rejects that write without exposing the occupant.
+                            // We then try the next slot.
+                            fun registerAtSlot(slotNumber: Int) {
+                                if (slotNumber > maxSlots) {
                                     done(false, "", did, "Device limit reached (${lic.deviceLimit}). Ask the Super Admin to revoke an old device or the License Team to increase the limit.")
-                                    return@addOnCompleteListener
+                                    return
                                 }
 
                                 val deviceRef = db.collection("devices").document(did)
-                                val slotRef = db.collection("deviceSlots").document("${user.tenantId}_$freeSlot")
+                                val slotRef = db.collection("deviceSlots").document("${user.tenantId}_$slotNumber")
                                 val batch = db.batch()
                                 batch.set(deviceRef, mapOf(
                                     "deviceId" to did,
@@ -1700,14 +1698,14 @@ private fun ensureDeviceAndSession(context: Context, user: UserRecord, done: (Bo
                                     "status" to "ACTIVE",
                                     "deviceName" to android.os.Build.MODEL,
                                     "platform" to "Android",
-                                    "slotNumber" to freeSlot,
+                                    "slotNumber" to slotNumber,
                                     "licenseId" to lic.documentId,
                                     "registeredAt" to FieldValue.serverTimestamp(),
                                     "lastSeenAt" to FieldValue.serverTimestamp()
                                 ), SetOptions.merge())
                                 batch.set(slotRef, mapOf(
                                     "tenantId" to user.tenantId,
-                                    "slotNumber" to freeSlot,
+                                    "slotNumber" to slotNumber,
                                     "deviceId" to did,
                                     "status" to "ACTIVE",
                                     "uid" to user.uid,
@@ -1715,11 +1713,32 @@ private fun ensureDeviceAndSession(context: Context, user: UserRecord, done: (Bo
                                     "licenseId" to lic.documentId,
                                     "updatedAt" to FieldValue.serverTimestamp()
                                 ), SetOptions.merge())
+
                                 batch.commit().addOnCompleteListener { t ->
-                                    if (t.isSuccessful) proceedWithDevice()
-                                    else done(false, "", did, firestoreFriendlyError(t.exception))
+                                    if (t.isSuccessful) {
+                                        proceedWithDevice()
+                                        return@addOnCompleteListener
+                                    }
+
+                                    // A concurrent request may have registered this exact
+                                    // device while this allocation was in flight. Recheck
+                                    // only the caller's own device before trying the next slot.
+                                    db.collection("devices")
+                                        .whereEqualTo("uid", user.uid)
+                                        .whereEqualTo("deviceId", did)
+                                        .limit(1)
+                                        .get()
+                                        .addOnCompleteListener { ownDeviceTask ->
+                                            if (ownDeviceTask.isSuccessful && !ownDeviceTask.result.isEmpty) {
+                                                proceedWithDevice()
+                                            } else {
+                                                registerAtSlot(slotNumber + 1)
+                                            }
+                                        }
                                 }
                             }
+
+                            registerAtSlot(1)
                         }
                 }
         }

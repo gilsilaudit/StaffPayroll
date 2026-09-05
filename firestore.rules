@@ -355,7 +355,19 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/licenses/$(request.resource.data.licenseId)).data.validUntil >= request.time;
 
       allow update: if isDeveloper()
-        || (signedIn() && request.resource.data.tenantId == resource.data.tenantId && isTenantSuperAdmin(resource.data.tenantId))
+        || (signedIn()
+          && request.resource.data.tenantId == resource.data.tenantId
+          && isTenantSuperAdmin(resource.data.tenantId)
+          && request.resource.data.uid == resource.data.uid)
+        || (signedIn()
+          && resource.data.status == "REVOKED"
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.tenantId == resource.data.tenantId
+          && request.resource.data.status == "ACTIVE"
+          && hasTenantUser(request.resource.data.tenantId)
+          && hasActiveLicenseForTenant(request.resource.data.tenantId)
+          && request.resource.data.licenseId == get(/databases/$(database)/documents/tenants/$(resource.data.tenantId)).data.activeLicenseId
+          && request.resource.data.slotNumber == resource.data.slotNumber)
         || (signedIn() && request.resource.data.uid == request.auth.uid && request.resource.data.tenantId == resource.data.tenantId);
       allow delete: if false;
     }

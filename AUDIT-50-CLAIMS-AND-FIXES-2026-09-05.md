@@ -112,3 +112,11 @@ These require a larger architecture decision rather than a safe local patch:
 - Automated UI/instrumentation test suite.
 
 Those should be separate milestones; mixing them into the licensing hotfix would increase the risk of introducing another Firestore regression.
+
+## Post-build Access Verification Fix — 2026-09-05
+
+After the first hardened build, Access Verification still exposed a tenant-wide `/deviceSlots` query. This was incompatible with the intentionally restricted `deviceSlots` read rule for ordinary customer users.
+
+The query has now been removed from `ensureDeviceAndSession()`. Device-slot allocation uses deterministic slot document writes and retries the next slot when an occupied slot is rejected. A same-device concurrency recheck reads only the caller's own device query.
+
+The `deviceSlots` update rule was also tightened so a Super Admin cannot overwrite an ACTIVE slot belonging to another UID. Revoked slots may be reclaimed by an authenticated active tenant user under the currently active license.
