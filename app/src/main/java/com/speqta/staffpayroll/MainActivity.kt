@@ -38,6 +38,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.google.firebase.FirebaseApp
@@ -55,6 +57,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 import java.util.UUID
+import kotlinx.coroutines.delay
 
 private const val DEFAULT_DEMO_DAYS = 3L
 private const val DEFAULT_DEMO_STAFF_LIMIT = 5L
@@ -68,7 +71,37 @@ private const val LEADS_COLLECTION = "leads"
 
 private fun defaultDemoModules(): Map<String, Boolean> = mapOf("attendance" to true, "leave" to true, "salary" to true, "payroll" to true, "reports" to true)
 
+/** Returns null when the value is invalid; callers must not silently substitute a demo policy. */
+private fun validateIndianMobileNumber(raw: String): String? {
+    val phone = raw.trim()
+    return when {
+        phone.isBlank() -> "Mobile number is required."
+        phone.length != 10 -> "Enter a valid 10-digit Indian mobile number."
+        !phone.all(Char::isDigit) -> "Enter a valid 10-digit Indian mobile number."
+        phone.first() !in '6'..'9' -> "Enter a valid 10-digit Indian mobile number."
+        else -> null
+    }
+}
+
+private fun readStrictDemoPolicy(d: DocumentSnapshot): DemoPolicy {
+    if (!d.exists()) throw IllegalStateException("Demo policy is not configured.")
+    val duration = d.getLong("durationDays") ?: throw IllegalStateException("Demo policy duration is not configured.")
+    val staff = d.getLong("staffLimit") ?: throw IllegalStateException("Demo policy staff limit is not configured.")
+    val devices = d.getLong("deviceLimit") ?: throw IllegalStateException("Demo policy device limit is not configured.")
+    if (duration < 1L || staff < 1L || devices < 1L) throw IllegalStateException("Demo policy contains invalid limits.")
+    val modules = (d.get("modules") as? Map<*, *>)
+        ?.mapNotNull { (k, v) -> if (k != null && v is Boolean) k.toString() to v else null }
+        ?.toMap()
+        ?: emptyMap()
+    return DemoPolicy(duration, staff, devices, defaultDemoModules() + modules)
+}
+
 private data class DemoPolicy(val durationDays: Long, val staffLimit: Long, val deviceLimit: Long, val modules: Map<String, Boolean>)
+private data class DemoCoreResult(
+    val licenseId: String, val clientId: String, val tenantId: String, val activationNumber: Long,
+    val validUntil: Timestamp, val staffLimit: Long, val deviceLimit: Long,
+    val modules: Map<String, Boolean>, val firstActivation: Boolean
+)
 private data class LeadPolicy(val statuses: List<String>)
 
 private fun defaultLeadStatuses(): List<String> = listOf("NEW", "CONTACTED", "DEMO_GIVEN", "FOLLOW_UP", "CONVERTED", "LOST")
@@ -285,37 +318,40 @@ private fun LoginScreen(auth: FirebaseAuth, onSignedIn: () -> Unit, onSignedUp: 
     var message by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var showSignUp by remember { mutableStateOf(false) }
-    var showPaidActivation by remember { mutableStateOf(false) }
     var showDemo by remember { mutableStateOf(false) }
     var demoPolicy by remember { mutableStateOf<DemoPolicy?>(null) }
+    var demoPolicyLoading by remember { mutableStateOf(true) }
+    var demoPolicyError by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
-        FirebaseFirestore.getInstance().collection("system").document(DEMO_POLICY_DOC).get().addOnCompleteListener { task ->
-            if (task.isSuccessful && task.result?.exists() == true) {
-                demoPolicy = demoPolicyFrom(task.result!!)
+        demoPolicyLoading = true
+        demoPolicyError = ""
+        FirebaseFirestore.getInstance().collection("system").document(DEMO_POLICY_DOC).get()
+            .addOnCompleteListener { task ->
+                demoPolicyLoading = false
+                if (task.isSuccessful && task.result?.exists() == true) {
+                    try {
+                        demoPolicy = readStrictDemoPolicy(task.result!!)
+                    } catch (e: Exception) {
+                        demoPolicy = null
+                        demoPolicyError = e.message ?: "Demo policy is not configured."
+                    }
+                } else if (task.isSuccessful) {
+                    demoPolicy = null
+                    demoPolicyError = "Demo policy is not configured right now."
+                } else {
+                    demoPolicy = null
+                    demoPolicyError = firestoreFriendlyError(task.exception)
+                }
             }
-        }
     }
 
-    // Android system Back gesture/button: close the currently open authentication sub-screen first.
-    BackHandler(enabled = showSignUp || showPaidActivation || showDemo) {
-        when {
-            showSignUp -> showSignUp = false
-            showPaidActivation -> showPaidActivation = false
-            showDemo -> showDemo = false
-        }
+    BackHandler(enabled = showSignUp || showDemo) {
+        if (showDemo) showDemo = false else showSignUp = false
     }
 
     if (showSignUp) {
         SignUpScreen(auth, email, onBack = { showSignUp = false }, onSignedUp = onSignedUp)
-        return
-    }
-    if (showPaidActivation) {
-        PaidCustomerActivationScreen(auth, email, onBack = { showPaidActivation = false }, onActivated = {
-            auth.signOut()
-            showPaidActivation = false
-            message = "License activated successfully. Please sign in with your new password."
-        })
         return
     }
     if (showDemo) {
@@ -348,13 +384,19 @@ private fun LoginScreen(auth: FirebaseAuth, onSignedIn: () -> Unit, onSignedUp: 
             }, Modifier.fillMaxWidth(), enabled = !busy
         ) { if (busy) CircularProgressIndicator() else Text("Sign in") }
         Spacer(Modifier.height(8.dp))
-        OutlinedButton(onClick = { showPaidActivation = true }, Modifier.fillMaxWidth(), enabled = !busy) { Text("Activate Purchased License") }
+        OutlinedButton(onClick = { showSignUp = true }, Modifier.fillMaxWidth(), enabled = !busy) { Text("Create Customer Account") }
         Spacer(Modifier.height(8.dp))
-        Button(onClick = { showDemo = true }, Modifier.fillMaxWidth(), enabled = !busy) {
-            Text(demoPolicy?.let { "Start ${it.durationDays}-Day Free Demo" } ?: "Start Free Demo")
+        Button(
+            onClick = { showDemo = true },
+            Modifier.fillMaxWidth(),
+            enabled = !busy && !demoPolicyLoading && demoPolicy != null
+        ) {
+            if (demoPolicyLoading) CircularProgressIndicator()
+            else Text("Start ${demoPolicy?.durationDays ?: ""}-Day Free Demo")
         }
-        demoPolicy?.let {
-            Text("Current offer: ${it.durationDays} days • ${it.staffLimit} staff • ${it.deviceLimit} devices", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (demoPolicyError.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text(demoPolicyError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(
@@ -367,260 +409,6 @@ private fun LoginScreen(auth: FirebaseAuth, onSignedIn: () -> Unit, onSignedUp: 
             }, Modifier.fillMaxWidth(), enabled = !busy
         ) { Text("Forgot password?") }
         if (message.isNotBlank()) { Spacer(Modifier.height(14.dp)); Text(message, color = MaterialTheme.colorScheme.error) }
-    }
-}
-
-
-@Composable
-private fun PaidCustomerActivationScreen(
-    auth: FirebaseAuth,
-    initialEmail: String,
-    onBack: () -> Unit,
-    onActivated: () -> Unit
-) {
-    BackHandler { onBack() }
-    val db = remember { FirebaseFirestore.getInstance() }
-    var email by remember { mutableStateOf(initialEmail) }
-    var password by remember { mutableStateOf("") }
-    var confirm by remember { mutableStateOf("") }
-    var customerName by remember { mutableStateOf("") }
-    var message by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var waitingForVerification by remember { mutableStateOf(false) }
-    var pendingUser by remember { mutableStateOf<FirebaseUser?>(null) }
-    var license by remember { mutableStateOf<LicenseRecord?>(null) }
-
-    fun loadAndClaimLicense(user: FirebaseUser) {
-        val mail = user.email?.trim()?.lowercase(Locale.ROOT).orEmpty()
-        if (mail.isBlank()) {
-            busy = false
-            message = "Your Firebase account does not have a valid email address."
-            return
-        }
-        // Look up the tenant by the registered email first. This avoids a collection
-        // query against all license documents and then reads the single linked license.
-        db.collection("tenants")
-            // Only one indexed equality is used here so customer activation does not
-            // depend on a manually-created composite Firestore index.
-            .whereEqualTo("primaryEmail", mail)
-            .limit(20)
-            .get()
-            .addOnCompleteListener { tenantTask ->
-                if (!tenantTask.isSuccessful) {
-                    busy = false
-                    message = firestoreFriendlyError(tenantTask.exception)
-                    return@addOnCompleteListener
-                }
-                val tenantDoc = tenantTask.result?.documents?.firstOrNull { doc ->
-                    doc.getString("status") == "ACTIVE"
-                        && doc.getString("accountType") == "PAID"
-                        && (doc.getString("ownershipStatus") ?: "UNASSIGNED") == "UNASSIGNED"
-                        && doc.getString("ownerUid").orEmpty().isBlank()
-                }
-                if (tenantDoc == null) {
-                    busy = false
-                    message = "No unactivated paid license was found for $mail. Please check the registered email or contact the License Team."
-                    return@addOnCompleteListener
-                }
-                val tenantId = tenantDoc.id
-                val licenseId = tenantDoc.getString("activeLicenseId").orEmpty()
-                if (licenseId.isBlank()) {
-                    busy = false
-                    message = "The customer license record is incomplete. Please contact the License Team."
-                    return@addOnCompleteListener
-                }
-                val tenantRef = db.collection("tenants").document(tenantId)
-                db.collection("licenses").document(licenseId).get().addOnCompleteListener { licenseTask ->
-                    if (!licenseTask.isSuccessful || licenseTask.result?.exists() != true) {
-                        busy = false
-                        message = firestoreFriendlyError(licenseTask.exception)
-                        return@addOnCompleteListener
-                    }
-                    val lic = licenseFrom(licenseTask.result!!)
-                    if (lic.licenseType != "PAID" || lic.status != "ACTIVE" || lic.tenantId != tenantId || lic.customerEmail.trim().lowercase(Locale.ROOT) != mail) {
-                        busy = false
-                        message = "The paid license record does not match this customer email. Please contact the License Team."
-                        return@addOnCompleteListener
-                    }
-                    if (lic.validUntil == null || lic.validUntil!! < Timestamp.now()) {
-                        busy = false
-                        message = "This paid license has expired. Please contact the License Team for renewal."
-                        return@addOnCompleteListener
-                    }
-                    license = lic
-                val userRef = db.collection("users").document(user.uid)
-                db.runTransaction { tx ->
-                    val tenantSnap = tx.get(tenantRef)
-                    if (!tenantSnap.exists()) throw IllegalStateException("The licensed customer record could not be found.")
-                    val ownership = tenantSnap.getString("ownershipStatus") ?: "UNASSIGNED"
-                    val ownerUid = tenantSnap.getString("ownerUid").orEmpty()
-                    val primaryEmail = tenantSnap.getString("primaryEmail")?.trim()?.lowercase(Locale.ROOT).orEmpty()
-                    val accountType = tenantSnap.getString("accountType") ?: "PAID"
-                    val activeLicenseId = tenantSnap.getString("activeLicenseId").orEmpty()
-                    val tenantStatus = tenantSnap.getString("status") ?: ""
-                    if (tenantStatus != "ACTIVE") throw IllegalStateException("This customer account is inactive. Please contact the License Team.")
-                    if (accountType != "PAID") throw IllegalStateException("This email is registered for a demo account, not a paid license.")
-                    if (primaryEmail != mail) throw IllegalStateException("This license is registered to a different email address.")
-                    if (activeLicenseId != lic.documentId && activeLicenseId != lic.licenseId) throw IllegalStateException("This license is not the active license for the customer account.")
-                    if (ownership != "UNASSIGNED" || ownerUid.isNotBlank()) throw IllegalStateException("This paid license has already been activated. Please sign in with the existing customer account or contact the License Team.")
-
-                    val existingUser = tx.get(userRef)
-                    if (existingUser.exists()) throw IllegalStateException("This Firebase account is already linked to a customer account. Please sign in normally.")
-
-                    val nextStaff = tenantSnap.getLong("nextStaffNumber") ?: 1L
-                    val staffId = "ST-%06d".format(Locale.ROOT, nextStaff)
-                    val displayName = customerName.trim().ifBlank { lic.customerName.ifBlank { mail.substringBefore("@").replaceFirstChar { it.uppercase(Locale.ROOT) } } }
-                    val now = Timestamp.now()
-                    tx.update(tenantRef, mapOf(
-                        "ownershipStatus" to "ASSIGNED",
-                        "ownerUid" to user.uid,
-                        "superAdminUids" to listOf(user.uid),
-                        "superAdminEmails" to listOf(mail),
-                        "nextStaffNumber" to nextStaff + 1L,
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    ))
-                    tx.set(userRef, mapOf(
-                        "uid" to user.uid,
-                        "email" to mail,
-                        "tenantId" to lic.tenantId,
-                        "role" to "SUPER_ADMIN",
-                        "status" to "ACTIVE",
-                        "staffId" to staffId,
-                        "displayName" to displayName,
-                        "accountType" to "PAID",
-                        "createdAt" to now,
-                        "updatedAt" to now
-                    ))
-                    true
-                    }.addOnCompleteListener { claimTask ->
-                        busy = false
-                        if (claimTask.isSuccessful) {
-                            message = "Paid license activated successfully."
-                            onActivated()
-                        } else {
-                            message = claimTask.exception?.message ?: "Unable to activate the paid license."
-                        }
-                    }
-                }
-            }
-    }
-
-    fun verifyAndActivate() {
-        val user = auth.currentUser ?: run {
-            busy = false
-            message = "Please create or sign in to the customer account first."
-            return
-        }
-        user.reload().addOnCompleteListener { reloadTask ->
-            if (!reloadTask.isSuccessful) {
-                busy = false
-                message = friendlyAuthError(reloadTask.exception)
-                return@addOnCompleteListener
-            }
-            val refreshed = auth.currentUser
-            if (refreshed?.isEmailVerified != true) {
-                busy = false
-                message = "Please verify your email, then tap 'I Have Verified My Email'."
-                return@addOnCompleteListener
-            }
-            loadAndClaimLicense(refreshed)
-        }
-    }
-
-    fun createAccount() {
-        val e = email.trim().lowercase(Locale.ROOT)
-        when {
-            e.isBlank() || !e.contains("@") -> message = "Enter the registered customer email."
-            password.length < 6 -> message = "Password must be at least 6 characters."
-            password != confirm -> message = "Passwords do not match."
-            else -> {
-                busy = true
-                message = ""
-                auth.createUserWithEmailAndPassword(e, password).addOnCompleteListener { task ->
-                    if (!task.isSuccessful) {
-                        busy = false
-                        message = friendlyAuthError(task.exception)
-                        return@addOnCompleteListener
-                    }
-                    val u = auth.currentUser
-                    pendingUser = u
-                    u?.sendEmailVerification()?.addOnCompleteListener { verifyTask ->
-                        busy = false
-                        if (verifyTask.isSuccessful) {
-                            waitingForVerification = true
-                            message = "Account created. We sent a verification email to $e. Verify it, then tap 'I Have Verified My Email'."
-                        } else {
-                            message = "Account created, but verification email could not be sent. Use Resend Verification Email below."
-                        }
-                    } ?: run {
-                        busy = false
-                        message = "Customer account could not be created. Please try again."
-                    }
-                }
-            }
-        }
-    }
-
-    fun signInExisting() {
-        val e = email.trim().lowercase(Locale.ROOT)
-        if (e.isBlank() || password.isBlank()) {
-            message = "Enter the registered email and password."
-            return
-        }
-        busy = true
-        message = ""
-        auth.signInWithEmailAndPassword(e, password).addOnCompleteListener { task ->
-            if (!task.isSuccessful) {
-                busy = false
-                message = friendlyAuthError(task.exception)
-                return@addOnCompleteListener
-            }
-            verifyAndActivate()
-        }
-    }
-
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Text("Activate Purchased License", style = MaterialTheme.typography.headlineMedium)
-        Text(
-            "The License Team registers your email with the paid license. You create your own password here. No license key is required.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        license?.let { lic ->
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(14.dp)) {
-                    Text("License found", style = MaterialTheme.typography.titleMedium)
-                    Text("${lic.clientId} — ${lic.customerName.ifBlank { "Customer" }}")
-                    Text("Staff limit: ${lic.staffLimit} • Device limit: ${lic.deviceLimit}")
-                    Text("Valid until: ${formatDate(lic.validUntil)}")
-                }
-            }
-        }
-        OutlinedTextField(email, { email = it; message = "" }, Modifier.fillMaxWidth(), label = { Text("Registered Customer Email") }, singleLine = true, enabled = !busy && !waitingForVerification)
-        OutlinedTextField(customerName, { customerName = it; message = "" }, Modifier.fillMaxWidth(), label = { Text("Your Name (optional)") }, singleLine = true, enabled = !busy && !waitingForVerification)
-        OutlinedTextField(password, { password = it; message = "" }, Modifier.fillMaxWidth(), label = { Text("Create Password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), enabled = !busy && !waitingForVerification)
-        OutlinedTextField(confirm, { confirm = it; message = "" }, Modifier.fillMaxWidth(), label = { Text("Confirm Password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), enabled = !busy && !waitingForVerification)
-
-        Button(onClick = { createAccount() }, Modifier.fillMaxWidth(), enabled = !busy && !waitingForVerification) {
-            if (busy) CircularProgressIndicator() else Text("Create Account & Send Verification")
-        }
-        OutlinedButton(onClick = { signInExisting() }, Modifier.fillMaxWidth(), enabled = !busy && !waitingForVerification) {
-            Text("Sign In Existing Account & Activate")
-        }
-        if (waitingForVerification) {
-            Button(onClick = { busy = true; verifyAndActivate() }, Modifier.fillMaxWidth(), enabled = !busy) {
-                if (busy) CircularProgressIndicator() else Text("I Have Verified My Email")
-            }
-            OutlinedButton(onClick = {
-                pendingUser?.sendEmailVerification()?.addOnCompleteListener { t ->
-                    message = if (t.isSuccessful) "Verification email sent again." else "Unable to resend verification email."
-                }
-            }, Modifier.fillMaxWidth(), enabled = !busy) { Text("Resend Verification Email") }
-        }
-        if (message.isNotBlank()) Text(message, color = if (message.contains("successfully", true)) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
-        OutlinedButton(onClick = onBack, Modifier.fillMaxWidth(), enabled = !busy) { Text("Back to Sign In") }
     }
 }
 
@@ -691,13 +479,29 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
     var blockedByUsedDemo by remember { mutableStateOf(false) }
     var leadSubmitted by remember { mutableStateOf(false) }
     var policy by remember { mutableStateOf<DemoPolicy?>(null) }
+    var policyLoading by remember { mutableStateOf(true) }
+    var resendBusy by remember { mutableStateOf(false) }
+    var resendCooldown by remember { mutableStateOf(0) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val deviceId = remember { getStableDeviceId(context) }
 
     LaunchedEffect(Unit) {
+        policyLoading = true
         db.collection("system").document(DEMO_POLICY_DOC).get().addOnCompleteListener { t ->
-            if (t.isSuccessful && t.result?.exists() == true) policy = demoPolicyFrom(t.result!!)
-            else if (!t.isSuccessful) message = firestoreFriendlyError(t.exception)
+            policyLoading = false
+            if (t.isSuccessful && t.result?.exists() == true) {
+                try { policy = readStrictDemoPolicy(t.result!!) }
+                catch (e: Exception) { message = e.message ?: "Demo policy is not configured." }
+            } else if (t.isSuccessful) {
+                message = "Demo policy is not configured right now."
+            } else message = firestoreFriendlyError(t.exception)
+        }
+    }
+
+    LaunchedEffect(resendCooldown) {
+        if (resendCooldown > 0) {
+            delay(1000)
+            resendCooldown -= 1
         }
     }
 
@@ -708,6 +512,7 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
             businessName.isBlank() -> message = "Business name is required."
             mail.isBlank() || !mail.contains("@") -> message = "Enter a valid email address."
             phone.isBlank() -> message = "Mobile number is required so our Sales Team can call you."
+            validateIndianMobileNumber(phone) != null -> message = validateIndianMobileNumber(phone)!!
             else -> {
                 busy = true
                 db.collection(LEADS_COLLECTION).add(mapOf(
@@ -716,6 +521,7 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
                     "email" to mail,
                     "phone" to phone.trim(),
                     "deviceId" to deviceId,
+                    "tenantId" to "demo-${auth.currentUser?.uid.orEmpty()}",
                     "leadType" to "DEMO_BLOCKED",
                     "source" to "SELF_SERVICE_DEMO_BLOCKED",
                     "reason" to "DEVICE_DEMO_ALREADY_USED",
@@ -736,146 +542,178 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
     }
 
     fun activateDemo() {
-        val current = auth.currentUser ?: run { message = "Please create the account first."; return }
+        val current = auth.currentUser ?: run { message = "Please create or sign in to the account first."; return }
         if (policy == null) { message = "Demo policy is still loading. Please try again."; return }
         busy = true
         current.reload().addOnCompleteListener { r ->
             if (!r.isSuccessful) { busy = false; message = friendlyAuthError(r.exception); return@addOnCompleteListener }
             val u = auth.currentUser
-            if (u?.isEmailVerified != true) {
-                busy = false
-                message = "Please verify your email, then tap 'I Have Verified My Email'."
-                return@addOnCompleteListener
-            }
-            val uid = u.uid
-            val mail = u.email?.trim()?.lowercase(Locale.ROOT).orEmpty()
-            val tenantId = "demo-$uid"
-            val tenantRef = db.collection("tenants").document(tenantId)
-            val userRef = db.collection("users").document(uid)
-            val policyRef = db.collection("system").document(DEMO_POLICY_DOC)
-            val deviceHistoryRef = db.collection(DEMO_DEVICE_HISTORY_COLLECTION).document(deviceId)
-
-            db.runTransaction { tx ->
-                val pd = tx.get(policyRef)
-                if (!pd.exists()) throw IllegalStateException("Demo policy is not configured.")
-                val p = demoPolicyFrom(pd)
-                val history = tx.get(deviceHistoryRef)
-                val resetAllowed = history.exists() && history.getBoolean("resetAvailable") == true
-                if (history.exists() && !resetAllowed) {
-                    throw DemoAlreadyUsedException()
+            if (u == null) { busy = false; message = "Your authentication session has expired. Please sign in again."; return@addOnCompleteListener }
+            u.getIdToken(true).addOnCompleteListener { tokenTask ->
+                if (!tokenTask.isSuccessful) { busy = false; message = friendlyAuthError(tokenTask.exception); return@addOnCompleteListener }
+                val refreshedUser = auth.currentUser
+                val verifiedClaim = tokenTask.result?.claims?.get("email_verified") == true
+                if (refreshedUser?.isEmailVerified != true || !verifiedClaim) {
+                    busy = false
+                    message = "Please verify your email, then tap 'I Have Verified My Email'."
+                    return@addOnCompleteListener
                 }
 
-                val existingTenant = tx.get(tenantRef)
-                val existingUser = tx.get(userRef)
-                val now = Timestamp.now()
-                val activationCount = (history.getLong("activationCount") ?: 0L) + 1L
-                val licenseId = "DEMO-LIC-$uid-$activationCount"
-                val clientId = if (existingTenant.exists()) existingTenant.getString("clientId") ?: "DEMO-$uid" else "DEMO-$uid"
-                val cal = Calendar.getInstance(); cal.time = now.toDate(); cal.add(Calendar.DAY_OF_YEAR, p.durationDays.toInt())
-                val endTs = Timestamp(cal.time)
-                val licenseRef = db.collection("licenses").document(licenseId)
+                val uid = refreshedUser.uid
+                val mail = refreshedUser.email?.trim()?.lowercase(Locale.ROOT).orEmpty()
+                if (mail.isBlank()) { busy = false; message = "Your Firebase account does not have a valid email address."; return@addOnCompleteListener }
+                val tenantId = "demo-$uid"
+                val tenantRef = db.collection("tenants").document(tenantId)
+                val userRef = db.collection("users").document(uid)
+                val policyRef = db.collection("system").document(DEMO_POLICY_DOC)
+                val deviceHistoryRef = db.collection(DEMO_DEVICE_HISTORY_COLLECTION).document(deviceId)
 
-                if (existingTenant.exists() && existingTenant.getString("accountType") != "DEMO") {
-                    throw IllegalStateException("A paid license already exists for this account. Please contact Sales Team.")
-                }
-                if (existingUser.exists() && existingUser.getString("accountType") != "DEMO") {
-                    throw IllegalStateException("This account is already linked to a paid license. Please contact Sales Team.")
-                }
+                // Read the existing state first. The actual activation is then a single
+                // atomic batch write. This avoids a transaction whose read/write rule
+                // evaluation can obscure which licensing record failed.
+                db.collection("system").document(DEMO_POLICY_DOC).get().addOnCompleteListener { policyTask ->
+                    if (!policyTask.isSuccessful) { busy = false; message = firestoreFriendlyError(policyTask.exception); return@addOnCompleteListener }
+                    val p = try { readStrictDemoPolicy(policyTask.result!!) } catch (e: Exception) {
+                        busy = false; message = e.message ?: "Demo policy is not configured."; return@addOnCompleteListener
+                    }
+                    db.collection(DEMO_DEVICE_HISTORY_COLLECTION).document(deviceId).get().addOnCompleteListener { historyTask ->
+                        if (!historyTask.isSuccessful) { busy = false; message = firestoreFriendlyError(historyTask.exception); return@addOnCompleteListener }
+                        val history = historyTask.result!!
+                        val resetAllowed = history.exists() && history.getBoolean("resetAvailable") == true
+                        // Device history is the anti-abuse ledger. It must NOT block the
+                        // owner from opening an already-active Demo account. That decision
+                        // is made after we load the account's tenant/user records below.
+                        db.collection("tenants").document(tenantId).get().addOnCompleteListener { tenantTask ->
+                            if (!tenantTask.isSuccessful) { busy = false; message = firestoreFriendlyError(tenantTask.exception); return@addOnCompleteListener }
+                            val existingTenant = tenantTask.result!!
+                            if (existingTenant.exists() && existingTenant.getString("accountType") != "DEMO") {
+                                busy = false; message = "A paid license already exists for this account. Please contact Sales Team."; return@addOnCompleteListener
+                            }
+                            db.collection("users").document(uid).get().addOnCompleteListener { userTask ->
+                                if (!userTask.isSuccessful) { busy = false; message = firestoreFriendlyError(userTask.exception); return@addOnCompleteListener }
+                                val existingUser = userTask.result!!
+                                if (existingUser.exists() && existingUser.getString("accountType") != "DEMO") {
+                                    busy = false; message = "This account is already linked to a paid license. Please contact Sales Team."; return@addOnCompleteListener
+                                }
 
-                tx.set(tenantRef, mapOf(
-                    "clientId" to clientId,
-                    "clientName" to businessName.trim(),
-                    "accountType" to "DEMO",
-                    "status" to "ACTIVE",
-                    "primaryEmail" to mail,
-                    "ownershipStatus" to "ASSIGNED",
-                    "ownerUid" to uid,
-                    "activeLicenseId" to licenseId,
-                    "activeDeviceCount" to 0L,
-                    "superAdminUids" to listOf(uid),
-                    "superAdminEmails" to listOf(mail),
-                    "nextStaffNumber" to 1L,
-                    "demoActivatedAt" to now,
-                    "demoValidUntil" to endTs,
-                    "customerName" to customerName.trim(),
-                    "phone" to phone.trim(),
-                    "createdAt" to (if (existingTenant.exists()) existingTenant.getTimestamp("createdAt") ?: now else now),
-                    "createdBy" to (if (existingTenant.exists()) existingTenant.getString("createdBy") ?: uid else uid),
-                    "updatedAt" to now
-                ), SetOptions.merge())
-                tx.set(licenseRef, mapOf(
-                    "licenseId" to licenseId,
-                    "clientId" to clientId,
-                    "tenantId" to tenantId,
-                    "customerEmail" to mail,
-                    "customerName" to customerName.trim(),
-                    "customerPhone" to phone.trim(),
-                    "licenseType" to "DEMO",
-                    "status" to "ACTIVE",
-                    "validFrom" to now,
-                    "validUntil" to endTs,
-                    "staffLimit" to p.staffLimit,
-                    "deviceLimit" to p.deviceLimit,
-                    "modules" to p.modules,
-                    "issuedAt" to now,
-                    "issuedBy" to if (activationCount == 1L) "SELF_SERVICE_DEMO" else "SALES_RESET_SELF_SERVICE",
-                    "createdAt" to now,
-                    "updatedAt" to now,
-                    "version" to 1L,
-                    "demoActivationNumber" to activationCount
-                ))
-                tx.set(userRef, mapOf(
-                    "uid" to uid, "email" to mail, "tenantId" to tenantId, "role" to "SUPER_ADMIN", "status" to "ACTIVE",
-                    "staffId" to "ST-000001", "displayName" to customerName.trim(), "accountType" to "DEMO", "createdAt" to now, "updatedAt" to now
-                ), SetOptions.merge())
-                tx.set(deviceHistoryRef, mapOf(
-                    "deviceId" to deviceId,
-                    "firstUid" to (history.getString("firstUid") ?: uid),
-                    "lastUid" to uid,
-                    "firstEmail" to (history.getString("firstEmail") ?: mail),
-                    "lastEmail" to mail,
-                    "firstUsedAt" to (history.getTimestamp("firstUsedAt") ?: now),
-                    "lastUsedAt" to now,
-                    "activationCount" to activationCount,
-                    "resetAvailable" to false,
-                    "resetUsedAt" to if (resetAllowed) now else null,
-                    "resetUsedBy" to if (resetAllowed) uid else null,
-                    "status" to "USED"
-                ), SetOptions.merge())
-                val activationType = if (activationCount == 1L) "FIRST_DEMO" else "RE_DEMO_AFTER_RESET"
-                val activationRef = db.collection(DEMO_ACTIVATIONS_COLLECTION).document()
-                tx.set(activationRef, mapOf(
-                    "licenseId" to licenseId, "clientId" to clientId, "tenantId" to tenantId,
-                    "customerName" to customerName.trim(), "businessName" to businessName.trim(),
-                    "customerEmail" to mail, "customerPhone" to phone.trim(), "deviceId" to deviceId,
-                    "activationNumber" to activationCount, "activationType" to activationType,
-                    "validUntil" to endTs, "staffLimit" to p.staffLimit, "deviceLimit" to p.deviceLimit,
-                    "modules" to p.modules, "activatedAt" to now, "activatedBy" to uid
-                ))
-                tx.set(db.collection(LEADS_COLLECTION).document(), mapOf(
-                    "leadType" to "DEMO_ACTIVATION", "source" to "DEMO_ACTIVATION",
-                    "activationId" to activationRef.id, "activationNumber" to activationCount,
-                    "activationType" to activationType, "licenseId" to licenseId, "clientId" to clientId, "tenantId" to tenantId,
-                    "customerName" to customerName.trim(), "businessName" to businessName.trim(),
-                    "email" to mail, "phone" to phone.trim(), "deviceId" to deviceId,
-                    "status" to "NEW", "followUpDate" to null, "remark" to "",
-                    "createdAt" to now, "createdByUid" to uid, "updatedAt" to now, "updatedByUid" to uid
-                ))
-                tx.set(db.collection("licenseHistory").document(), mapOf(
-                    "licenseId" to licenseId, "clientId" to clientId, "tenantId" to tenantId, "customerEmail" to mail,
-                    "action" to if (activationCount == 1L) "DEMO_ACTIVATED" else "DEMO_REACTIVATED_AFTER_RESET",
-                    "licenseType" to "DEMO", "newStaffLimit" to p.staffLimit, "newDeviceLimit" to p.deviceLimit,
-                    "newValidUntil" to endTs, "demoActivationNumber" to activationCount, "deviceId" to deviceId,
-                    "changedAt" to now, "changedBy" to uid
-                ))
-                true
-            }.addOnCompleteListener { t ->
-                busy = false
-                if (t.isSuccessful) { message = "Free demo activated successfully."; onActivated() }
-                else if (t.exception is DemoAlreadyUsedException) {
-                    blockedByUsedDemo = true
-                    message = "Demo already used on this device/account. Kindly buy the license."
-                } else message = t.exception?.message ?: "Unable to activate demo."
+                                // IMPORTANT UX RULE:
+                                // An ACTIVE Demo belonging to this same account is an existing
+                                // entitlement, not a request for a second Demo. If the customer
+                                // reaches this screen again, simply continue into the account.
+                                val demoValidUntil = existingTenant.getTimestamp("demoValidUntil")
+                                val existingActiveDemo = existingTenant.exists()
+                                    && existingTenant.getString("accountType") == "DEMO"
+                                    && existingTenant.getString("status") == "ACTIVE"
+                                    && existingTenant.getString("ownerUid") == uid
+                                    && existingTenant.getString("activeLicenseId").orEmpty().isNotBlank()
+                                    && existingUser.exists()
+                                    && existingUser.getString("accountType") == "DEMO"
+                                    && existingUser.getString("status") == "ACTIVE"
+                                    && demoValidUntil != null
+                                    && demoValidUntil.toDate().after(Timestamp.now().toDate())
+
+                                if (existingActiveDemo) {
+                                    busy = false
+                                    blockedByUsedDemo = false
+                                    message = "Your existing Demo is active. Opening your Demo account…"
+                                    onActivated()
+                                    return@addOnCompleteListener
+                                }
+
+                                // Only a customer who does NOT already have an active Demo is
+                                // blocked by the device history. A Sales reset can explicitly
+                                // permit one additional Demo.
+                                if (history.exists() && !resetAllowed) {
+                                    busy = false
+                                    blockedByUsedDemo = true
+                                    message = "This device has already been used for a demo. Kindly buy the license."
+                                    return@addOnCompleteListener
+                                }
+
+                                val now = Timestamp.now()
+                                val activationCount = (history.getLong("activationCount") ?: 0L) + 1L
+                                val licenseId = "DEMO-LIC-$uid-$activationCount"
+                                val clientId = existingTenant.getString("clientId") ?: "DEMO-$uid"
+                                val cal = Calendar.getInstance().apply { time = now.toDate(); add(Calendar.DAY_OF_YEAR, p.durationDays.toInt()) }
+                                val endTs = Timestamp(cal.time)
+                                val licenseRef = db.collection("licenses").document(licenseId)
+
+                                val batch = db.batch()
+                                batch.set(tenantRef, mapOf(
+                                    "clientId" to clientId, "clientName" to businessName.trim(), "accountType" to "DEMO",
+                                    "status" to "ACTIVE", "primaryEmail" to mail, "ownershipStatus" to "ASSIGNED", "ownerUid" to uid,
+                                    "activeLicenseId" to licenseId, "activeDeviceCount" to 0L,
+                                    "superAdminUids" to listOf(uid), "superAdminEmails" to listOf(mail), "nextStaffNumber" to 1L,
+                                    "demoActivatedAt" to now, "demoValidUntil" to endTs, "customerName" to customerName.trim(),
+                                    "phone" to phone.trim(), "createdAt" to (existingTenant.getTimestamp("createdAt") ?: now),
+                                    "createdBy" to (existingTenant.getString("createdBy") ?: uid), "updatedAt" to now
+                                ), SetOptions.merge())
+                                batch.set(licenseRef, mapOf(
+                                    "licenseId" to licenseId, "clientId" to clientId, "tenantId" to tenantId,
+                                    "customerEmail" to mail, "customerName" to customerName.trim(), "customerPhone" to phone.trim(),
+                                    "licenseType" to "DEMO", "status" to "ACTIVE", "validFrom" to now, "validUntil" to endTs,
+                                    "staffLimit" to p.staffLimit, "deviceLimit" to p.deviceLimit, "modules" to p.modules, "deviceId" to deviceId,
+                                    "issuedAt" to now, "issuedBy" to if (activationCount == 1L) "SELF_SERVICE_DEMO" else "SALES_RESET_SELF_SERVICE",
+                                    "createdAt" to now, "updatedAt" to now, "version" to 1L, "demoActivationNumber" to activationCount
+                                ))
+                                batch.set(userRef, mapOf(
+                                    "uid" to uid, "email" to mail, "tenantId" to tenantId, "role" to "SUPER_ADMIN",
+                                    "status" to "ACTIVE", "staffId" to "ST-000001", "displayName" to customerName.trim(),
+                                    "accountType" to "DEMO", "createdAt" to (existingUser.getTimestamp("createdAt") ?: now), "updatedAt" to now
+                                ), SetOptions.merge())
+                                batch.set(deviceHistoryRef, mapOf(
+                                    "deviceId" to deviceId, "firstUid" to (history.getString("firstUid") ?: uid), "lastUid" to uid,
+                                    "firstEmail" to (history.getString("firstEmail") ?: mail), "lastEmail" to mail,
+                                    "firstUsedAt" to (history.getTimestamp("firstUsedAt") ?: now), "lastUsedAt" to now,
+                                    "activationCount" to activationCount, "resetAvailable" to false,
+                                    "resetUsedAt" to if (resetAllowed) now else null, "resetUsedBy" to if (resetAllowed) uid else null,
+                                    "status" to "USED"
+                                ), SetOptions.merge())
+
+                                batch.commit().addOnCompleteListener { coreTask ->
+                                    busy = false
+                                    if (!coreTask.isSuccessful) {
+                                        message = firestoreFriendlyError(coreTask.exception)
+                                        return@addOnCompleteListener
+                                    }
+                                    val activationType = if (activationCount == 1L) "FIRST_DEMO" else "RE_DEMO_AFTER_RESET"
+                                    val activationRef = db.collection(DEMO_ACTIVATIONS_COLLECTION).document()
+                                    val commonLead = mapOf(
+                                        "leadType" to "DEMO_ACTIVATION", "source" to "DEMO_ACTIVATION", "activationId" to activationRef.id,
+                                        "activationNumber" to activationCount, "activationType" to activationType, "licenseId" to licenseId,
+                                        "clientId" to clientId, "tenantId" to tenantId, "customerName" to customerName.trim(),
+                                        "businessName" to businessName.trim(), "email" to mail, "phone" to phone.trim(), "deviceId" to deviceId,
+                                        "status" to "NEW", "followUpDate" to null, "remark" to "", "createdAt" to Timestamp.now(),
+                                        "createdByUid" to uid, "updatedAt" to Timestamp.now(), "updatedByUid" to uid
+                                    )
+                                    val activationData = mapOf(
+                                        "licenseId" to licenseId, "clientId" to clientId, "tenantId" to tenantId,
+                                        "customerName" to customerName.trim(), "businessName" to businessName.trim(), "customerEmail" to mail,
+                                        "customerPhone" to phone.trim(), "deviceId" to deviceId, "activationNumber" to activationCount,
+                                        "activationType" to activationType, "validUntil" to endTs, "staffLimit" to p.staffLimit,
+                                        "deviceLimit" to p.deviceLimit, "modules" to p.modules, "activatedAt" to Timestamp.now(), "activatedBy" to uid
+                                    )
+                                    val historyData = mapOf(
+                                        "licenseId" to licenseId, "clientId" to clientId, "tenantId" to tenantId, "customerEmail" to mail,
+                                        "action" to if (activationCount == 1L) "DEMO_ACTIVATED" else "DEMO_REACTIVATED_AFTER_RESET",
+                                        "licenseType" to "DEMO", "newStaffLimit" to p.staffLimit, "newDeviceLimit" to p.deviceLimit,
+                                        "newValidUntil" to endTs, "demoActivationNumber" to activationCount, "deviceId" to deviceId,
+                                        "changedAt" to Timestamp.now(), "changedBy" to uid
+                                    )
+                                    val auditBatch = db.batch()
+                                    auditBatch.set(activationRef, activationData)
+                                    auditBatch.set(db.collection(LEADS_COLLECTION).document(), commonLead)
+                                    auditBatch.set(db.collection("licenseHistory").document(), historyData)
+                                    auditBatch.commit().addOnCompleteListener { auditTask ->
+                                        if (auditTask.isSuccessful) message = "Free demo activated successfully."
+                                        else message = "Free demo activated successfully. Some activity history could not be saved yet."
+                                        onActivated()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -888,10 +726,25 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
             OutlinedTextField(email,{email=it},Modifier.fillMaxWidth(),label={Text("Email")},singleLine=true,enabled=!busy&&!waitingForVerification)
             OutlinedTextField(customerName,{customerName=it},Modifier.fillMaxWidth(),label={Text("Your Name")},singleLine=true,enabled=!busy&&!waitingForVerification)
             OutlinedTextField(businessName,{businessName=it},Modifier.fillMaxWidth(),label={Text("Business Name")},singleLine=true,enabled=!busy&&!waitingForVerification)
-            OutlinedTextField(phone,{phone=it},Modifier.fillMaxWidth(),label={Text("Mobile Number")},singleLine=true,enabled=!busy&&!waitingForVerification)
+            OutlinedTextField(phone,{phone=it.filter(Char::isDigit).take(10)},Modifier.fillMaxWidth(),label={Text("Mobile Number")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone),enabled=!busy&&!waitingForVerification)
             OutlinedTextField(password,{password=it},Modifier.fillMaxWidth(),label={Text("Password")},singleLine=true,visualTransformation=PasswordVisualTransformation(),enabled=!busy&&!waitingForVerification)
             OutlinedTextField(confirm,{confirm=it},Modifier.fillMaxWidth(),label={Text("Confirm Password")},singleLine=true,visualTransformation=PasswordVisualTransformation(),enabled=!busy&&!waitingForVerification)
-            Button(onClick={val e=email.trim();when{e.isBlank()->message="Email is required.";!e.contains("@")->message="Enter a valid email address.";customerName.isBlank()->message="Your name is required.";businessName.isBlank()->message="Business name is required.";phone.isBlank()->message="Mobile number is required.";password.length<6->message="Password must be at least 6 characters.";password!=confirm->message="Passwords do not match.";policy==null->message="Demo policy is not available right now. Please try again later.";else->{busy=true;auth.createUserWithEmailAndPassword(e,password).addOnCompleteListener{t->if(!t.isSuccessful){busy=false;message=friendlyAuthError(t.exception);return@addOnCompleteListener};waitingForVerification=true;auth.currentUser?.sendEmailVerification()?.addOnCompleteListener{v->busy=false;message=if(v.isSuccessful)"Account created. Verify your email, then tap 'I Have Verified My Email'." else "Account created, but verification email could not be sent."}}}}},Modifier.fillMaxWidth(),enabled=!busy&&!waitingForVerification){if(busy)CircularProgressIndicator()else Text("Create Demo Account")}
+            Button(onClick={val e=email.trim();when{e.isBlank()->message="Email is required.";!e.contains("@")->message="Enter a valid email address.";customerName.isBlank()->message="Your name is required.";businessName.isBlank()->message="Business name is required.";phone.isBlank()->message="Mobile number is required.";validateIndianMobileNumber(phone)!=null->message=validateIndianMobileNumber(phone)!!;password.length<6->message="Password must be at least 6 characters.";password!=confirm->message="Passwords do not match.";policyLoading->message="Demo policy is still loading. Please wait a moment.";policy==null->message="Demo policy is not configured right now. Please contact the License Team.";else->{busy=true;auth.createUserWithEmailAndPassword(e,password).addOnCompleteListener{t->if(!t.isSuccessful){busy=false;message=friendlyAuthError(t.exception);return@addOnCompleteListener};waitingForVerification=true
+                        val createdUser = auth.currentUser
+                        if (createdUser == null) {
+                            busy=false
+                            message="Account created, but the verification session could not be opened. Please sign in again."
+                        } else {
+                            createdUser.sendEmailVerification().addOnCompleteListener { v ->
+                                busy=false
+                                if (v.isSuccessful) {
+                                    resendCooldown = 30
+                                    message="Account created. Verification email sent. Check your inbox and spam folder, verify your email, then tap 'I Have Verified My Email'."
+                                } else {
+                                    message="Account created, but the verification email could not be sent. ${friendlyAuthError(v.exception)}"
+                                }
+                            }
+                        }}}}},Modifier.fillMaxWidth(),enabled=!busy&&!waitingForVerification){if(busy)CircularProgressIndicator()else Text("Create Demo Account")}
             OutlinedButton(onClick={
                 val e=email.trim()
                 if(e.isBlank()||password.isBlank()){message="Enter the existing demo account email and password.";return@OutlinedButton}
@@ -900,13 +753,45 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
                     if(!t.isSuccessful){busy=false;message=friendlyAuthError(t.exception);return@addOnCompleteListener}
                     auth.currentUser?.reload()?.addOnCompleteListener{r->
                         if(!r.isSuccessful){busy=false;message=friendlyAuthError(r.exception);return@addOnCompleteListener}
-                        if(auth.currentUser?.isEmailVerified!=true){busy=false;message="Please verify your email first.";return@addOnCompleteListener}
-                        activateDemo()
+                        val existing = auth.currentUser
+                        if(existing?.isEmailVerified!=true){busy=false;message="Please verify your email first.";return@addOnCompleteListener}
+                        // Existing-account login is a LOGIN action, not a new Demo activation.
+                        // AccessRouter will verify the user/tenant/device/session and open the
+                        // existing Demo account without consuming another Demo entitlement.
+                        busy=false
+                        onActivated()
                     }
                 }
-            },Modifier.fillMaxWidth(),enabled=!busy&&!waitingForVerification){Text("Sign in Existing Demo Account")}
+            },Modifier.fillMaxWidth(),enabled=!busy&&!waitingForVerification){Text("Sign in to Existing Demo Account")}
 
-            if(waitingForVerification){Button(onClick={activateDemo()},Modifier.fillMaxWidth(),enabled=!busy){Text("I Have Verified My Email")};OutlinedButton(onClick={auth.currentUser?.sendEmailVerification();message="Verification email sent again."},Modifier.fillMaxWidth(),enabled=!busy){Text("Resend Verification Email")}}
+            if(waitingForVerification){
+                Button(onClick={activateDemo()},Modifier.fillMaxWidth(),enabled=!busy&&!resendBusy){Text("I Have Verified My Email")}
+                OutlinedButton(
+                    onClick={
+                        val u = auth.currentUser
+                        if (u == null) {
+                            message = "Please sign in to resend the verification email."
+                        } else {
+                            resendBusy = true
+                            message = ""
+                            u.sendEmailVerification().addOnCompleteListener { v ->
+                                resendBusy = false
+                                if (v.isSuccessful) {
+                                    resendCooldown = 30
+                                    message = "Verification email sent again. Check your inbox and spam folder."
+                                } else {
+                                    message = "Verification email could not be sent. ${friendlyAuthError(v.exception)}"
+                                }
+                            }
+                        }
+                    },
+                    Modifier.fillMaxWidth(),
+                    enabled=!busy&&!resendBusy&&resendCooldown==0
+                ){
+                    if (resendBusy) CircularProgressIndicator()
+                    else Text(if (resendCooldown > 0) "Resend in ${resendCooldown}s" else "Resend Verification Email")
+                }
+            }
         } else {
             Text("Demo Already Used", style = MaterialTheme.typography.headlineSmall)
             Text("This device has already been used for a demo. Kindly buy the license.", color = MaterialTheme.colorScheme.error)
@@ -914,7 +799,7 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
             OutlinedTextField(customerName,{customerName=it},Modifier.fillMaxWidth(),label={Text("Your Name")},singleLine=true,enabled=!busy&&!leadSubmitted)
             OutlinedTextField(businessName,{businessName=it},Modifier.fillMaxWidth(),label={Text("Business Name")},singleLine=true,enabled=!busy&&!leadSubmitted)
             OutlinedTextField(email,{email=it},Modifier.fillMaxWidth(),label={Text("Email")},singleLine=true,enabled=!busy&&!leadSubmitted)
-            OutlinedTextField(phone,{phone=it},Modifier.fillMaxWidth(),label={Text("Mobile Number")},singleLine=true,enabled=!busy&&!leadSubmitted)
+            OutlinedTextField(phone,{phone=it.filter(Char::isDigit).take(10)},Modifier.fillMaxWidth(),label={Text("Mobile Number")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone),enabled=!busy&&!leadSubmitted)
             Text("Device ID: $deviceId", style = MaterialTheme.typography.bodySmall)
             if (!leadSubmitted) Button(onClick={submitLead()},Modifier.fillMaxWidth(),enabled=!busy){if(busy)CircularProgressIndicator()else Text("Request Sales Callback")}
             else Text("Lead submitted successfully. Sales Team will contact you.", color = MaterialTheme.colorScheme.primary)
@@ -935,17 +820,6 @@ private fun DeveloperScreen(email: String, onSignOut: () -> Unit) {
     var showDemoReset by remember { mutableStateOf(false) }
     var showDemoActivations by remember { mutableStateOf(false) }
     var showLeadPolicy by remember { mutableStateOf(false) }
-    BackHandler(enabled = showTenants || showLicenses || showDemoPolicy || showDemoLeads || showDemoReset || showDemoActivations || showLeadPolicy) {
-        when {
-            showTenants -> showTenants = false
-            showLicenses -> showLicenses = false
-            showDemoPolicy -> showDemoPolicy = false
-            showDemoLeads -> showDemoLeads = false
-            showDemoReset -> showDemoReset = false
-            showDemoActivations -> showDemoActivations = false
-            showLeadPolicy -> showLeadPolicy = false
-        }
-    }
     val db = remember { FirebaseFirestore.getInstance() }
     LaunchedEffect(Unit) {
         val ref = db.collection("system").document(DEMO_POLICY_DOC)
@@ -960,6 +834,19 @@ private fun DeveloperScreen(email: String, onSignOut: () -> Unit) {
             if (task.isSuccessful && task.result?.exists() != true) {
                 val uid = FirebaseAuth.getInstance().currentUser?.uid.orEmpty()
                 leadRef.set(mapOf("statuses" to defaultLeadStatuses(), "updatedAt" to FieldValue.serverTimestamp(), "updatedBy" to uid, "version" to 1L), SetOptions.merge())
+            }
+        }
+    }
+    if (showTenants || showLicenses || showDemoPolicy || showDemoLeads || showDemoReset || showDemoActivations || showLeadPolicy) {
+        BackHandler {
+            when {
+                showTenants -> showTenants = false
+                showLicenses -> showLicenses = false
+                showDemoPolicy -> showDemoPolicy = false
+                showDemoLeads -> showDemoLeads = false
+                showDemoReset -> showDemoReset = false
+                showDemoActivations -> showDemoActivations = false
+                showLeadPolicy -> showLeadPolicy = false
             }
         }
     }
@@ -1069,7 +956,7 @@ private fun TenantAndLicenseCreateScreen(onBack: () -> Unit, onSignOut: () -> Un
                         val clientId = "CL-%06d".format(Locale.ROOT, next)
                         val licenseId = "LIC-%06d".format(Locale.ROOT, next)
                         val start = Timestamp.now()
-                        val livePolicy = if (licenseType == "DEMO") demoPolicyFrom(tx.get(db.collection("system").document(DEMO_POLICY_DOC))) else null
+                        val livePolicy = if (licenseType == "DEMO") readStrictDemoPolicy(tx.get(db.collection("system").document(DEMO_POLICY_DOC))) else null
                         val finalDays = livePolicy?.durationDays ?: days
                         val finalStaff = livePolicy?.staffLimit ?: staff
                         val finalDevices = livePolicy?.deviceLimit ?: devices
@@ -1447,13 +1334,18 @@ private fun CustomerOnboardingScreen(user: FirebaseUser, onSignOut: () -> Unit) 
             if (!reloadTask.isSuccessful) { loading = false; message = friendlyAuthError(reloadTask.exception); return@addOnCompleteListener }
             if (authIsVerified(user).not()) { loading = false; message = "Please verify your email address first, then sign in again."; return@addOnCompleteListener }
             val email = user.email?.trim()?.lowercase(Locale.ROOT).orEmpty()
-            db.collection("licenses").whereEqualTo("customerEmail", email).limit(20).get().addOnCompleteListener { task ->
+            db.collection("licenses").whereEqualTo("customerEmail", email).whereEqualTo("status", "ACTIVE").whereGreaterThanOrEqualTo("validUntil", Timestamp.now()).limit(1).get().addOnCompleteListener { task ->
             if (!task.isSuccessful) { loading = false; message = firestoreFriendlyError(task.exception); return@addOnCompleteListener }
-            val doc = task.result?.documents?.firstOrNull { candidate ->
-                candidate.getString("status") == "ACTIVE"
-                    && ((candidate.getTimestamp("validUntil")?.toDate()?.time ?: 0L) >= System.currentTimeMillis())
+            val doc = task.result?.documents?.firstOrNull()
+            if (doc == null) {
+                loading = false
+                message = if (user.isEmailVerified) {
+                    "No active license is registered for this email. If this is a Demo account, open Start Free Demo and complete email verification to activate it."
+                } else {
+                    "Please verify your email address first, then sign in again."
+                }
+                return@addOnCompleteListener
             }
-            if (doc == null) { loading = false; message = "No active license is registered for this email. Please contact the License Team."; return@addOnCompleteListener }
             val lic = licenseFrom(doc); license = lic
             db.collection("tenants").document(lic.tenantId).get().addOnCompleteListener { tenantTask ->
                 loading = false
@@ -1616,51 +1508,145 @@ private fun getStableDeviceId(context: Context): String {
 
 private fun ensureDeviceAndSession(context: Context, user: UserRecord, done: (Boolean, String, String, String) -> Unit) {
     val db = FirebaseFirestore.getInstance()
-    val prefs = context.getSharedPreferences("staff_payroll_identity", Context.MODE_PRIVATE)
     val did = getStableDeviceId(context)
-    val deviceRef = db.collection("devices").document(did)
-    db.collection("sessions").whereEqualTo("uid", user.uid).whereEqualTo("status", "ACTIVE").get().addOnCompleteListener { activeTask ->
-        if (!activeTask.isSuccessful) { done(false, "", did, firestoreFriendlyError(activeTask.exception)); return@addOnCompleteListener }
-        val other = activeTask.result?.documents?.firstOrNull { it.getString("deviceId") != did }
-        if (other != null) { done(false, "", did, "This staff/admin account is already active on another device. Ask the customer Super Admin to Force Logout the old session."); return@addOnCompleteListener }
-        deviceRef.get().addOnCompleteListener { deviceTask ->
-            if (!deviceTask.isSuccessful) { done(false, "", did, firestoreFriendlyError(deviceTask.exception)); return@addOnCompleteListener }
-            val existing = deviceTask.result
+
+    // IMPORTANT: do not call get() on a possibly non-existent /devices/{id} document.
+    // The device read rule is based on document fields (uid), so a missing document
+    // cannot satisfy that rule. Querying by uid + deviceId is both secure and works
+    // for the first registration when no device document exists yet.
+    db.collection("sessions")
+        .whereEqualTo("uid", user.uid)
+        .whereEqualTo("status", "ACTIVE")
+        .get()
+        .addOnCompleteListener { activeTask ->
+            if (!activeTask.isSuccessful) {
+                done(false, "", did, firestoreFriendlyError(activeTask.exception))
+                return@addOnCompleteListener
+            }
+
+            val other = activeTask.result?.documents?.firstOrNull { it.getString("deviceId") != did }
+            if (other != null) {
+                done(false, "", did, "This staff/admin account is already active on another device. Ask the customer Super Admin to Force Logout the old session.")
+                return@addOnCompleteListener
+            }
+
             val proceedWithDevice: () -> Unit = {
                 val existingSession = activeTask.result?.documents?.firstOrNull { it.getString("deviceId") == did }
                 if (existingSession != null) {
                     val sid = existingSession.id
-                    db.collection("sessions").document(sid).update("lastSeenAt", FieldValue.serverTimestamp()).addOnCompleteListener { t ->
-                        done(t.isSuccessful, sid, did, if (t.isSuccessful) "" else firestoreFriendlyError(t.exception))
-                    }
+                    db.collection("sessions").document(sid).update("lastSeenAt", FieldValue.serverTimestamp())
+                        .addOnCompleteListener { t ->
+                            done(t.isSuccessful, sid, did, if (t.isSuccessful) "" else firestoreFriendlyError(t.exception))
+                        }
                 } else {
                     val sessionRef = db.collection("sessions").document("SES-${UUID.randomUUID()}")
                     sessionRef.set(mapOf(
-                        "sessionId" to sessionRef.id, "tenantId" to user.tenantId, "uid" to user.uid, "staffId" to user.staffId,
-                        "deviceId" to did, "loginAt" to FieldValue.serverTimestamp(), "lastSeenAt" to FieldValue.serverTimestamp(), "status" to "ACTIVE"
-                    )).addOnCompleteListener { t -> done(t.isSuccessful, if (t.isSuccessful) sessionRef.id else "", did, if (t.isSuccessful) "" else firestoreFriendlyError(t.exception)) }
+                        "sessionId" to sessionRef.id,
+                        "tenantId" to user.tenantId,
+                        "uid" to user.uid,
+                        "staffId" to user.staffId,
+                        "deviceId" to did,
+                        "loginAt" to FieldValue.serverTimestamp(),
+                        "lastSeenAt" to FieldValue.serverTimestamp(),
+                        "status" to "ACTIVE"
+                    )).addOnCompleteListener { t ->
+                        done(t.isSuccessful, if (t.isSuccessful) sessionRef.id else "", did,
+                            if (t.isSuccessful) "" else firestoreFriendlyError(t.exception))
+                    }
                 }
             }
-            if (existing != null && existing.exists()) { proceedWithDevice(); return@addOnCompleteListener }
-            db.collection("licenses").whereEqualTo("tenantId", user.tenantId).whereEqualTo("status", "ACTIVE").whereGreaterThanOrEqualTo("validUntil", Timestamp.now()).limit(1).get().addOnCompleteListener { licTask ->
-                val lic = licTask.result?.documents?.firstOrNull()?.let { licenseFrom(it) }
-                if (lic == null) { done(false, "", did, "No active license was found."); return@addOnCompleteListener }
-                val maxSlots = minOf(lic.deviceLimit, 100L).toInt()
-                val slotIds = (1..maxSlots).map { "${user.tenantId}_$it" }
-                db.collection("deviceSlots").whereEqualTo("tenantId", user.tenantId).whereEqualTo("status", "ACTIVE").get().addOnCompleteListener { slotsTask ->
-                    if (!slotsTask.isSuccessful) { done(false, "", did, firestoreFriendlyError(slotsTask.exception)); return@addOnCompleteListener }
-                    val used = slotsTask.result?.documents?.mapNotNull { it.getLong("slotNumber")?.toInt() }?.toSet() ?: emptySet()
-                    val freeSlot = (1..maxSlots).firstOrNull { it !in used }
-                    if (freeSlot == null) { done(false, "", did, "Device limit reached (${lic.deviceLimit}). Ask the Super Admin to revoke an old device or the License Team to increase the limit."); return@addOnCompleteListener }
-                    val slotRef = db.collection("deviceSlots").document("${user.tenantId}_$freeSlot")
-                    val batch = db.batch()
-                    batch.set(deviceRef, mapOf("deviceId" to did, "tenantId" to user.tenantId, "uid" to user.uid, "staffId" to user.staffId, "status" to "ACTIVE", "deviceName" to android.os.Build.MODEL, "platform" to "Android", "slotNumber" to freeSlot, "licenseId" to lic.documentId, "registeredAt" to FieldValue.serverTimestamp(), "lastSeenAt" to FieldValue.serverTimestamp()), SetOptions.merge())
-                    batch.set(slotRef, mapOf("tenantId" to user.tenantId, "slotNumber" to freeSlot, "deviceId" to did, "status" to "ACTIVE", "uid" to user.uid, "staffId" to user.staffId, "licenseId" to lic.documentId, "updatedAt" to FieldValue.serverTimestamp()), SetOptions.merge())
-                    batch.commit().addOnCompleteListener { t -> if (t.isSuccessful) proceedWithDevice() else done(false, "", did, firestoreFriendlyError(t.exception)) }
+
+            // Secure first-registration lookup: the query is provably allowed by
+            // /devices read rule because it constrains uid to the signed-in user.
+            db.collection("devices")
+                .whereEqualTo("uid", user.uid)
+                .whereEqualTo("deviceId", did)
+                .limit(1)
+                .get()
+                .addOnCompleteListener { deviceTask ->
+                    if (!deviceTask.isSuccessful) {
+                        done(false, "", did, firestoreFriendlyError(deviceTask.exception))
+                        return@addOnCompleteListener
+                    }
+
+                    val existing = deviceTask.result?.documents?.firstOrNull()
+                    if (existing != null) {
+                        proceedWithDevice()
+                        return@addOnCompleteListener
+                    }
+
+                    // No device record yet. Find an active license and allocate a slot.
+                    db.collection("licenses")
+                        .whereEqualTo("tenantId", user.tenantId)
+                        .whereEqualTo("status", "ACTIVE")
+                        .whereGreaterThanOrEqualTo("validUntil", Timestamp.now())
+                        .limit(1)
+                        .get()
+                        .addOnCompleteListener { licTask ->
+                            if (!licTask.isSuccessful) {
+                                done(false, "", did, firestoreFriendlyError(licTask.exception))
+                                return@addOnCompleteListener
+                            }
+                            val lic = licTask.result?.documents?.firstOrNull()?.let { licenseFrom(it) }
+                            if (lic == null) {
+                                done(false, "", did, "No active license was found.")
+                                return@addOnCompleteListener
+                            }
+
+                            val maxSlots = minOf(lic.deviceLimit, 100L).toInt()
+                            val used = db.collection("deviceSlots")
+                                .whereEqualTo("tenantId", user.tenantId)
+                                .whereEqualTo("status", "ACTIVE")
+                                .get()
+
+                            used.addOnCompleteListener { slotsTask ->
+                                if (!slotsTask.isSuccessful) {
+                                    done(false, "", did, firestoreFriendlyError(slotsTask.exception))
+                                    return@addOnCompleteListener
+                                }
+                                val usedNumbers = slotsTask.result?.documents
+                                    ?.mapNotNull { it.getLong("slotNumber")?.toInt() }
+                                    ?.toSet() ?: emptySet()
+                                val freeSlot = (1..maxSlots).firstOrNull { it !in usedNumbers }
+                                if (freeSlot == null) {
+                                    done(false, "", did, "Device limit reached (${lic.deviceLimit}). Ask the Super Admin to revoke an old device or the License Team to increase the limit.")
+                                    return@addOnCompleteListener
+                                }
+
+                                val deviceRef = db.collection("devices").document(did)
+                                val slotRef = db.collection("deviceSlots").document("${user.tenantId}_$freeSlot")
+                                val batch = db.batch()
+                                batch.set(deviceRef, mapOf(
+                                    "deviceId" to did,
+                                    "tenantId" to user.tenantId,
+                                    "uid" to user.uid,
+                                    "staffId" to user.staffId,
+                                    "status" to "ACTIVE",
+                                    "deviceName" to android.os.Build.MODEL,
+                                    "platform" to "Android",
+                                    "slotNumber" to freeSlot,
+                                    "licenseId" to lic.documentId,
+                                    "registeredAt" to FieldValue.serverTimestamp(),
+                                    "lastSeenAt" to FieldValue.serverTimestamp()
+                                ), SetOptions.merge())
+                                batch.set(slotRef, mapOf(
+                                    "tenantId" to user.tenantId,
+                                    "slotNumber" to freeSlot,
+                                    "deviceId" to did,
+                                    "status" to "ACTIVE",
+                                    "uid" to user.uid,
+                                    "staffId" to user.staffId,
+                                    "licenseId" to lic.documentId,
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                ), SetOptions.merge())
+                                batch.commit().addOnCompleteListener { t ->
+                                    if (t.isSuccessful) proceedWithDevice()
+                                    else done(false, "", did, firestoreFriendlyError(t.exception))
+                                }
+                            }
+                        }
                 }
-            }
         }
-    }
 }
 
 private fun authIsVerified(user: FirebaseUser): Boolean = user.isEmailVerified
@@ -1685,12 +1671,7 @@ private fun leadPolicyFrom(d: DocumentSnapshot): LeadPolicy {
     return LeadPolicy(if (list.contains("NEW")) list else defaultLeadStatuses())
 }
 
-private fun demoPolicyFrom(d: DocumentSnapshot): DemoPolicy = DemoPolicy(
-    durationDays=d.getLong("durationDays") ?: DEFAULT_DEMO_DAYS,
-    staffLimit=d.getLong("staffLimit") ?: DEFAULT_DEMO_STAFF_LIMIT,
-    deviceLimit=d.getLong("deviceLimit") ?: DEFAULT_DEMO_DEVICE_LIMIT,
-    modules=((d.get("modules") as? Map<*, *>)?.mapNotNull { (k,v) -> if(k!=null && v is Boolean) k.toString() to v else null }?.toMap() ?: emptyMap()).let { defaultDemoModules()+it }
-)
+private fun demoPolicyFrom(d: DocumentSnapshot): DemoPolicy = readStrictDemoPolicy(d)
 
 private fun licenseFrom(d: DocumentSnapshot): LicenseRecord = LicenseRecord(
     documentId = d.id, licenseId = d.getString("licenseId") ?: d.id, clientId = d.getString("clientId") ?: "",
@@ -1714,8 +1695,10 @@ private fun parseDate(text: String): java.util.Date? = try { SimpleDateFormat("d
 private fun firestoreFriendlyError(exception: Exception?): String {
     val m = exception?.message.orEmpty()
     return when {
-        m.contains("PERMISSION_DENIED", true) -> "Firestore permission denied. Deploy the licensing rules from GitHub Actions and verify the account role."
+        m.contains("PERMISSION_DENIED", true) -> "Firestore permission denied. Please deploy the latest Firestore rules from GitHub Actions. Details: ${m.take(220)}"
+        m.contains("FAILED_PRECONDITION", true) || m.contains("index", true) -> "Firestore index/configuration is required. Details: ${m.take(220)}"
         m.contains("network", true) -> "Network error. Please check your internet connection."
+        m.isNotBlank() -> "Firestore error: ${m.take(220)}"
         else -> "Unable to access licensing data. Please try again."
     }
 }
