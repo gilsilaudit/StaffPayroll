@@ -625,10 +625,10 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
                         && userSnap.getString("status") == "ACTIVE"
                         && demoValidUntil != null
                         && demoValidUntil.toDate().after(Timestamp.now().toDate())
-                    if (existingActiveDemo) throw ExistingActiveDemoException
+                    if (existingActiveDemo) throw ExistingActiveDemoException()
 
                     if (history.exists() && !resetAllowed) {
-                        throw DemoAlreadyUsedException
+                        throw DemoAlreadyUsedException()
                     }
 
                     val now = Timestamp.now()
