@@ -1663,8 +1663,9 @@ private fun ensureDeviceAndSession(context: Context, user: UserRecord, done: (Bo
                                         return@addOnCompleteListener
                                     }
                                     val lic = licenseFrom(licSnap)
+                                    val validUntil = lic.validUntil
                                     if (lic.tenantId != user.tenantId || lic.status != "ACTIVE" ||
-                                        !lic.validUntil.toDate().after(Timestamp.now().toDate())) {
+                                        validUntil == null || !validUntil.toDate().after(Timestamp.now().toDate())) {
                                         done(false, "", did, "The customer license is inactive or expired. Please contact the License Team.")
                                         return@addOnCompleteListener
                                     }
