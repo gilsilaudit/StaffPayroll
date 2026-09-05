@@ -1632,34 +1632,42 @@ private fun ensureDeviceAndSession(context: Context, user: UserRecord, done: (Bo
                         return@addOnCompleteListener
                     }
 
-                    // No device record yet. Find an active license and allocate a slot.
-                    // IMPORTANT: /licenses read access for customers is authorized by
-                    // customerEmail. Querying by tenantId/status/validUntil is not
-                    // provably authorized by the Firestore rules and causes
-                    // PERMISSION_DENIED for paid customers. Query by authenticated email
-                    // and validate tenant/status/expiry locally.
-                    db.collection("licenses")
-                        .whereEqualTo("customerEmail", user.email.trim().lowercase(Locale.ROOT))
-                        .whereEqualTo("status", "ACTIVE")
-                        .limit(20)
-                        .get()
-                        .addOnCompleteListener { licTask ->
-                            if (!licTask.isSuccessful) {
-                                done(false, "", did, firestoreFriendlyError(licTask.exception))
+                    // Resolve the tenant first and then read the exact active-license
+                    // document. Avoid collection queries on /licenses because Firestore
+                    // rules must be able to prove every possible result is readable.
+                    db.collection("tenants").document(user.tenantId).get()
+                        .addOnCompleteListener { tenantTask ->
+                            if (!tenantTask.isSuccessful) {
+                                done(false, "", did, firestoreFriendlyError(tenantTask.exception))
                                 return@addOnCompleteListener
                             }
-                            val now = Timestamp.now()
-                            val lic = licTask.result?.documents
-                                ?.firstOrNull { d ->
-                                    d.getString("tenantId") == user.tenantId &&
-                                        d.getString("status") == "ACTIVE" &&
-                                        (d.getTimestamp("validUntil")?.toDate()?.after(now.toDate()) == true)
-                                }
-                                ?.let { licenseFrom(it) }
-                            if (lic == null) {
-                                done(false, "", did, "No active license was found for this customer tenant.")
+                            val tenantSnap = tenantTask.result
+                            if (tenantSnap == null || !tenantSnap.exists()) {
+                                done(false, "", did, "Customer tenant was not found. Please contact the License Team.")
                                 return@addOnCompleteListener
                             }
+                            val activeLicenseId = tenantSnap.getString("activeLicenseId").orEmpty()
+                            if (activeLicenseId.isBlank()) {
+                                done(false, "", did, "No active license is linked to this customer tenant.")
+                                return@addOnCompleteListener
+                            }
+                            db.collection("licenses").document(activeLicenseId).get()
+                                .addOnCompleteListener { licTask ->
+                                    if (!licTask.isSuccessful) {
+                                        done(false, "", did, firestoreFriendlyError(licTask.exception))
+                                        return@addOnCompleteListener
+                                    }
+                                    val licSnap = licTask.result
+                                    if (licSnap == null || !licSnap.exists()) {
+                                        done(false, "", did, "The active license record was not found. Please contact the License Team.")
+                                        return@addOnCompleteListener
+                                    }
+                                    val lic = licenseFrom(licSnap)
+                                    if (lic.tenantId != user.tenantId || lic.status != "ACTIVE" ||
+                                        !lic.validUntil.toDate().after(Timestamp.now().toDate())) {
+                                        done(false, "", did, "The customer license is inactive or expired. Please contact the License Team.")
+                                        return@addOnCompleteListener
+                                    }
 
                             val maxSlots = minOf(lic.deviceLimit, 100L).toInt()
                             val used = db.collection("deviceSlots")
@@ -1714,6 +1722,7 @@ private fun ensureDeviceAndSession(context: Context, user: UserRecord, done: (Bo
                             }
                         }
                 }
+        }
         }
 }
 
