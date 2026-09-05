@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {"collectionGroup":"sessions","queryScope":"COLLECTION","fields":[{"fieldPath":"uid","order":"ASCENDING"},{"fieldPath":"status","order":"ASCENDING"}]},
+    {"collectionGroup":"sessions","queryScope":"COLLECTION","fields":[{"fieldPath":"tenantId","order":"ASCENDING"},{"fieldPath":"status","order":"ASCENDING"}]},
+    {"collectionGroup":"devices","queryScope":"COLLECTION","fields":[{"fieldPath":"tenantId","order":"ASCENDING"},{"fieldPath":"status","order":"ASCENDING"}]},
+    {"collectionGroup":"deviceSlots","queryScope":"COLLECTION","fields":[{"fieldPath":"tenantId","order":"ASCENDING"},{"fieldPath":"status","order":"ASCENDING"}]},
+    {"collectionGroup":"licenses","queryScope":"COLLECTION","fields":[{"fieldPath":"customerEmail","order":"ASCENDING"},{"fieldPath":"status","order":"ASCENDING"}]},
+    {"collectionGroup":"licenses","queryScope":"COLLECTION","fields":[{"fieldPath":"validUntil","order":"ASCENDING"}]},
+    {"collectionGroup":"demoActivations","queryScope":"COLLECTION","fields":[{"fieldPath":"activatedAt","order":"DESCENDING"}]},
+    {"collectionGroup":"leads","queryScope":"COLLECTION","fields":[{"fieldPath":"createdAt","order":"DESCENDING"}]}
+  ],
+  "fieldOverrides": []
+}

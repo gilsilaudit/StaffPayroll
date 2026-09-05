@@ -42,6 +42,29 @@ service cloud.firestore {
     function ownUser(uid) {
       return signedIn() && request.auth.uid == uid;
     }
+    function validCoreLicenseData(data) {
+      return data.licenseId is string
+        && data.clientId is string
+        && data.tenantId is string
+        && data.customerEmail is string
+        && data.licenseType is string
+        && data.status is string
+        && data.validFrom is timestamp
+        && data.validUntil is timestamp
+        && data.staffLimit is int
+        && data.deviceLimit is int
+        && data.modules is map;
+    }
+
+    function validDemoHistoryData(data) {
+      return data.deviceId is string
+        && data.firstUid is string
+        && data.lastUid is string
+        && data.activationCount is int
+        && data.resetAvailable is bool
+        && data.status == "USED";
+    }
+
 
     match /system/counters {
       allow read, write: if isDeveloper();
@@ -138,6 +161,9 @@ service cloud.firestore {
           && request.resource.data.tenantId == "demo-" + request.auth.uid
           && request.resource.data.customerEmail == request.auth.token.email
           && request.resource.data.clientId == "DEMO-" + request.auth.uid
+          && validCoreLicenseData(request.resource.data)
+          && request.resource.data.deviceId is string
+          && request.resource.data.demoActivationNumber is int
           && exists(/databases/$(database)/documents/system/demoPolicy)
           && request.resource.data.staffLimit == get(/databases/$(database)/documents/system/demoPolicy).data.staffLimit
           && request.resource.data.deviceLimit == get(/databases/$(database)/documents/system/demoPolicy).data.deviceLimit
@@ -171,8 +197,9 @@ service cloud.firestore {
     }
 
     match /demoDeviceHistory/{deviceId} {
-      // Minimal device-demo ledger. Customers can read only the specific ID their
-      // app knows locally; the document contains no business data.
+      // The client must be able to read a missing document during first activation.
+      // This ledger contains no business/customer secrets; writes remain tightly bound
+      // to the verified account and deterministic device document ID.
       allow read: if signedIn();
       allow create: if signedIn()
         && request.auth.token.email_verified == true
@@ -180,7 +207,7 @@ service cloud.firestore {
         && request.resource.data.firstUid == request.auth.uid
         && request.resource.data.activationCount == 1
         && request.resource.data.resetAvailable == false
-        && request.resource.data.status == "USED";
+        && validDemoHistoryData(request.resource.data);
       allow update: if isDeveloper()
         || (signedIn()
           && resource.data.lastUid == request.auth.uid
@@ -189,7 +216,7 @@ service cloud.firestore {
           && request.resource.data.activationCount == resource.data.activationCount + 1
           && resource.data.resetAvailable == true
           && request.resource.data.resetAvailable == false
-          && request.resource.data.status == "USED");
+          && validDemoHistoryData(request.resource.data));
       allow delete: if false;
     }
 

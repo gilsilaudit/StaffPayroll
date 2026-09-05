@@ -41,7 +41,11 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfigs.findByName("release")?.let { signingConfig = it }
+            val releaseSigning = signingConfigs.findByName("release")
+            if (gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) } && releaseSigning == null) {
+                throw GradleException("Release signing is not configured. Provide ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD.")
+            }
+            releaseSigning?.let { signingConfig = it }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

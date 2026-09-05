@@ -3,6 +3,8 @@ package com.speqta.staffpayroll
 import android.content.Context
 import android.os.Bundle
 import android.provider.Settings
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -102,6 +104,9 @@ private data class DemoCoreResult(
     val validUntil: Timestamp, val staffLimit: Long, val deviceLimit: Long,
     val modules: Map<String, Boolean>, val firstActivation: Boolean
 )
+private class ExistingActiveDemoException : Exception()
+private class DemoAlreadyUsedException : Exception()
+
 private data class LeadPolicy(val statuses: List<String>)
 
 private fun defaultLeadStatuses(): List<String> = listOf("NEW", "CONTACTED", "DEMO_GIVEN", "FOLLOW_UP", "CONVERTED", "LOST")
@@ -167,6 +172,21 @@ private data class SessionRecord(
     val status: String
 )
 
+private const val FIRESTORE_TIMEOUT_MS = 30_000L
+
+private fun hasNetworkConnection(context: Context): Boolean {
+    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+    val network = cm.activeNetwork ?: return false
+    val caps = cm.getNetworkCapabilities(network) ?: return false
+    return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+}
+
+private fun normalizedEmail(value: String?): String = value?.trim()?.lowercase(Locale.ROOT).orEmpty()
+
+private fun normalizedLicenseKey(value: String): String =
+    value.trim().uppercase(Locale.ROOT).replace("-", "").replace(" ", "")
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -214,6 +234,11 @@ private fun AccessRouter(user: FirebaseUser, context: Context, onSignOut: () -> 
         loading = true
         error = ""
         userRecord = null
+        if (!hasNetworkConnection(context)) {
+            loading = false
+            error = "No internet connection. Connect to the internet and sign in again."
+            return@LaunchedEffect
+        }
         developer = false
         deviceId = ""
         sessionId = ""
@@ -570,150 +595,129 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
                 val policyRef = db.collection("system").document(DEMO_POLICY_DOC)
                 val deviceHistoryRef = db.collection(DEMO_DEVICE_HISTORY_COLLECTION).document(deviceId)
 
-                // Read the existing state first. The actual activation is then a single
-                // atomic batch write. This avoids a transaction whose read/write rule
-                // evaluation can obscure which licensing record failed.
-                db.collection("system").document(DEMO_POLICY_DOC).get().addOnCompleteListener { policyTask ->
-                    if (!policyTask.isSuccessful) { busy = false; message = firestoreFriendlyError(policyTask.exception); return@addOnCompleteListener }
-                    val p = try { readStrictDemoPolicy(policyTask.result!!) } catch (e: Exception) {
-                        busy = false; message = e.message ?: "Demo policy is not configured."; return@addOnCompleteListener
+                // Demo entitlement allocation is a single Firestore transaction.
+                // The device-history ledger is read and written in the same transaction,
+                // so two concurrent activations cannot both observe an unused device.
+                db.runTransaction { tx ->
+                    val policySnap = tx.get(policyRef)
+                    val p = readStrictDemoPolicy(policySnap)
+                    val history = tx.get(deviceHistoryRef)
+                    val tenantSnap = tx.get(tenantRef)
+                    val userSnap = tx.get(userRef)
+
+                    val resetAllowed = history.exists() && history.getBoolean("resetAvailable") == true
+                    val existingTenant = tenantSnap
+                    if (existingTenant.exists() && existingTenant.getString("accountType") != "DEMO") {
+                        throw IllegalStateException("A paid license already exists for this account. Please contact Sales Team.")
                     }
-                    db.collection(DEMO_DEVICE_HISTORY_COLLECTION).document(deviceId).get().addOnCompleteListener { historyTask ->
-                        if (!historyTask.isSuccessful) { busy = false; message = firestoreFriendlyError(historyTask.exception); return@addOnCompleteListener }
-                        val history = historyTask.result!!
-                        val resetAllowed = history.exists() && history.getBoolean("resetAvailable") == true
-                        // Device history is the anti-abuse ledger. It must NOT block the
-                        // owner from opening an already-active Demo account. That decision
-                        // is made after we load the account's tenant/user records below.
-                        db.collection("tenants").document(tenantId).get().addOnCompleteListener { tenantTask ->
-                            if (!tenantTask.isSuccessful) { busy = false; message = firestoreFriendlyError(tenantTask.exception); return@addOnCompleteListener }
-                            val existingTenant = tenantTask.result!!
-                            if (existingTenant.exists() && existingTenant.getString("accountType") != "DEMO") {
-                                busy = false; message = "A paid license already exists for this account. Please contact Sales Team."; return@addOnCompleteListener
+                    if (userSnap.exists() && userSnap.getString("accountType") != "DEMO") {
+                        throw IllegalStateException("This account is already linked to a paid license. Please contact Sales Team.")
+                    }
+
+                    val demoValidUntil = existingTenant.getTimestamp("demoValidUntil")
+                    val existingActiveDemo = existingTenant.exists()
+                        && existingTenant.getString("accountType") == "DEMO"
+                        && existingTenant.getString("status") == "ACTIVE"
+                        && existingTenant.getString("ownerUid") == uid
+                        && existingTenant.getString("activeLicenseId").orEmpty().isNotBlank()
+                        && userSnap.exists()
+                        && userSnap.getString("accountType") == "DEMO"
+                        && userSnap.getString("status") == "ACTIVE"
+                        && demoValidUntil != null
+                        && demoValidUntil.toDate().after(Timestamp.now().toDate())
+                    if (existingActiveDemo) throw ExistingActiveDemoException
+
+                    if (history.exists() && !resetAllowed) {
+                        throw DemoAlreadyUsedException
+                    }
+
+                    val now = Timestamp.now()
+                    val activationCount = (history.getLong("activationCount") ?: 0L) + 1L
+                    val licenseId = "DEMO-LIC-$uid-$activationCount"
+                    val clientId = existingTenant.getString("clientId") ?: "DEMO-$uid"
+                    val cal = Calendar.getInstance().apply { time = now.toDate(); add(Calendar.DAY_OF_YEAR, p.durationDays.toInt()) }
+                    val endTs = Timestamp(cal.time)
+                    val licenseRef = db.collection("licenses").document(licenseId)
+
+                    tx.set(tenantRef, mapOf(
+                        "clientId" to clientId, "clientName" to businessName.trim(), "accountType" to "DEMO",
+                        "status" to "ACTIVE", "primaryEmail" to mail, "ownershipStatus" to "ASSIGNED", "ownerUid" to uid,
+                        "activeLicenseId" to licenseId, "activeDeviceCount" to 0L,
+                        "superAdminUids" to listOf(uid), "superAdminEmails" to listOf(mail), "nextStaffNumber" to 1L,
+                        "demoActivatedAt" to now, "demoValidUntil" to endTs, "customerName" to customerName.trim(),
+                        "phone" to phone.trim(), "createdAt" to (existingTenant.getTimestamp("createdAt") ?: now),
+                        "createdBy" to (existingTenant.getString("createdBy") ?: uid), "updatedAt" to now
+                    ), SetOptions.merge())
+                    tx.set(licenseRef, mapOf(
+                        "licenseId" to licenseId, "clientId" to clientId, "tenantId" to tenantId,
+                        "customerEmail" to mail, "customerName" to customerName.trim(), "customerPhone" to phone.trim(),
+                        "licenseType" to "DEMO", "status" to "ACTIVE", "validFrom" to now, "validUntil" to endTs,
+                        "staffLimit" to p.staffLimit, "deviceLimit" to p.deviceLimit, "modules" to p.modules, "deviceId" to deviceId,
+                        "issuedAt" to now, "issuedBy" to if (activationCount == 1L) "SELF_SERVICE_DEMO" else "SALES_RESET_SELF_SERVICE",
+                        "createdAt" to now, "updatedAt" to now, "version" to 1L, "demoActivationNumber" to activationCount
+                    ))
+                    tx.set(userRef, mapOf(
+                        "uid" to uid, "email" to mail, "tenantId" to tenantId, "role" to "SUPER_ADMIN",
+                        "status" to "ACTIVE", "staffId" to "ST-000001", "displayName" to customerName.trim(),
+                        "accountType" to "DEMO", "createdAt" to (userSnap.getTimestamp("createdAt") ?: now), "updatedAt" to now
+                    ), SetOptions.merge())
+                    tx.set(deviceHistoryRef, mapOf(
+                        "deviceId" to deviceId, "firstUid" to (history.getString("firstUid") ?: uid), "lastUid" to uid,
+                        "activationCount" to activationCount, "resetAvailable" to false, "status" to "USED",
+                        "firstUsedAt" to (history.getTimestamp("firstUsedAt") ?: now), "lastUsedAt" to now,
+                        "updatedAt" to now
+                    ), SetOptions.merge())
+                    DemoCoreResult(licenseId, clientId, tenantId, activationCount, endTs, p.staffLimit, p.deviceLimit, p.modules, activationCount == 1L)
+                }.addOnCompleteListener { coreTask ->
+                    busy = false
+                    if (!coreTask.isSuccessful) {
+                        val ex = coreTask.exception
+                        when (ex) {
+                            is ExistingActiveDemoException -> {
+                                blockedByUsedDemo = false
+                                message = "Your existing Demo is active. Opening your Demo account…"
+                                onActivated()
                             }
-                            db.collection("users").document(uid).get().addOnCompleteListener { userTask ->
-                                if (!userTask.isSuccessful) { busy = false; message = firestoreFriendlyError(userTask.exception); return@addOnCompleteListener }
-                                val existingUser = userTask.result!!
-                                if (existingUser.exists() && existingUser.getString("accountType") != "DEMO") {
-                                    busy = false; message = "This account is already linked to a paid license. Please contact Sales Team."; return@addOnCompleteListener
-                                }
-
-                                // IMPORTANT UX RULE:
-                                // An ACTIVE Demo belonging to this same account is an existing
-                                // entitlement, not a request for a second Demo. If the customer
-                                // reaches this screen again, simply continue into the account.
-                                val demoValidUntil = existingTenant.getTimestamp("demoValidUntil")
-                                val existingActiveDemo = existingTenant.exists()
-                                    && existingTenant.getString("accountType") == "DEMO"
-                                    && existingTenant.getString("status") == "ACTIVE"
-                                    && existingTenant.getString("ownerUid") == uid
-                                    && existingTenant.getString("activeLicenseId").orEmpty().isNotBlank()
-                                    && existingUser.exists()
-                                    && existingUser.getString("accountType") == "DEMO"
-                                    && existingUser.getString("status") == "ACTIVE"
-                                    && demoValidUntil != null
-                                    && demoValidUntil.toDate().after(Timestamp.now().toDate())
-
-                                if (existingActiveDemo) {
-                                    busy = false
-                                    blockedByUsedDemo = false
-                                    message = "Your existing Demo is active. Opening your Demo account…"
-                                    onActivated()
-                                    return@addOnCompleteListener
-                                }
-
-                                // Only a customer who does NOT already have an active Demo is
-                                // blocked by the device history. A Sales reset can explicitly
-                                // permit one additional Demo.
-                                if (history.exists() && !resetAllowed) {
-                                    busy = false
-                                    blockedByUsedDemo = true
-                                    message = "This device has already been used for a demo. Kindly buy the license."
-                                    return@addOnCompleteListener
-                                }
-
-                                val now = Timestamp.now()
-                                val activationCount = (history.getLong("activationCount") ?: 0L) + 1L
-                                val licenseId = "DEMO-LIC-$uid-$activationCount"
-                                val clientId = existingTenant.getString("clientId") ?: "DEMO-$uid"
-                                val cal = Calendar.getInstance().apply { time = now.toDate(); add(Calendar.DAY_OF_YEAR, p.durationDays.toInt()) }
-                                val endTs = Timestamp(cal.time)
-                                val licenseRef = db.collection("licenses").document(licenseId)
-
-                                val batch = db.batch()
-                                batch.set(tenantRef, mapOf(
-                                    "clientId" to clientId, "clientName" to businessName.trim(), "accountType" to "DEMO",
-                                    "status" to "ACTIVE", "primaryEmail" to mail, "ownershipStatus" to "ASSIGNED", "ownerUid" to uid,
-                                    "activeLicenseId" to licenseId, "activeDeviceCount" to 0L,
-                                    "superAdminUids" to listOf(uid), "superAdminEmails" to listOf(mail), "nextStaffNumber" to 1L,
-                                    "demoActivatedAt" to now, "demoValidUntil" to endTs, "customerName" to customerName.trim(),
-                                    "phone" to phone.trim(), "createdAt" to (existingTenant.getTimestamp("createdAt") ?: now),
-                                    "createdBy" to (existingTenant.getString("createdBy") ?: uid), "updatedAt" to now
-                                ), SetOptions.merge())
-                                batch.set(licenseRef, mapOf(
-                                    "licenseId" to licenseId, "clientId" to clientId, "tenantId" to tenantId,
-                                    "customerEmail" to mail, "customerName" to customerName.trim(), "customerPhone" to phone.trim(),
-                                    "licenseType" to "DEMO", "status" to "ACTIVE", "validFrom" to now, "validUntil" to endTs,
-                                    "staffLimit" to p.staffLimit, "deviceLimit" to p.deviceLimit, "modules" to p.modules, "deviceId" to deviceId,
-                                    "issuedAt" to now, "issuedBy" to if (activationCount == 1L) "SELF_SERVICE_DEMO" else "SALES_RESET_SELF_SERVICE",
-                                    "createdAt" to now, "updatedAt" to now, "version" to 1L, "demoActivationNumber" to activationCount
-                                ))
-                                batch.set(userRef, mapOf(
-                                    "uid" to uid, "email" to mail, "tenantId" to tenantId, "role" to "SUPER_ADMIN",
-                                    "status" to "ACTIVE", "staffId" to "ST-000001", "displayName" to customerName.trim(),
-                                    "accountType" to "DEMO", "createdAt" to (existingUser.getTimestamp("createdAt") ?: now), "updatedAt" to now
-                                ), SetOptions.merge())
-                                batch.set(deviceHistoryRef, mapOf(
-                                    "deviceId" to deviceId, "firstUid" to (history.getString("firstUid") ?: uid), "lastUid" to uid,
-                                    "firstEmail" to (history.getString("firstEmail") ?: mail), "lastEmail" to mail,
-                                    "firstUsedAt" to (history.getTimestamp("firstUsedAt") ?: now), "lastUsedAt" to now,
-                                    "activationCount" to activationCount, "resetAvailable" to false,
-                                    "resetUsedAt" to if (resetAllowed) now else null, "resetUsedBy" to if (resetAllowed) uid else null,
-                                    "status" to "USED"
-                                ), SetOptions.merge())
-
-                                batch.commit().addOnCompleteListener { coreTask ->
-                                    busy = false
-                                    if (!coreTask.isSuccessful) {
-                                        message = firestoreFriendlyError(coreTask.exception)
-                                        return@addOnCompleteListener
-                                    }
-                                    val activationType = if (activationCount == 1L) "FIRST_DEMO" else "RE_DEMO_AFTER_RESET"
-                                    val activationRef = db.collection(DEMO_ACTIVATIONS_COLLECTION).document()
-                                    val commonLead = mapOf(
-                                        "leadType" to "DEMO_ACTIVATION", "source" to "DEMO_ACTIVATION", "activationId" to activationRef.id,
-                                        "activationNumber" to activationCount, "activationType" to activationType, "licenseId" to licenseId,
-                                        "clientId" to clientId, "tenantId" to tenantId, "customerName" to customerName.trim(),
-                                        "businessName" to businessName.trim(), "email" to mail, "phone" to phone.trim(), "deviceId" to deviceId,
-                                        "status" to "NEW", "followUpDate" to null, "remark" to "", "createdAt" to Timestamp.now(),
-                                        "createdByUid" to uid, "updatedAt" to Timestamp.now(), "updatedByUid" to uid
-                                    )
-                                    val activationData = mapOf(
-                                        "licenseId" to licenseId, "clientId" to clientId, "tenantId" to tenantId,
-                                        "customerName" to customerName.trim(), "businessName" to businessName.trim(), "customerEmail" to mail,
-                                        "customerPhone" to phone.trim(), "deviceId" to deviceId, "activationNumber" to activationCount,
-                                        "activationType" to activationType, "validUntil" to endTs, "staffLimit" to p.staffLimit,
-                                        "deviceLimit" to p.deviceLimit, "modules" to p.modules, "activatedAt" to Timestamp.now(), "activatedBy" to uid
-                                    )
-                                    val historyData = mapOf(
-                                        "licenseId" to licenseId, "clientId" to clientId, "tenantId" to tenantId, "customerEmail" to mail,
-                                        "action" to if (activationCount == 1L) "DEMO_ACTIVATED" else "DEMO_REACTIVATED_AFTER_RESET",
-                                        "licenseType" to "DEMO", "newStaffLimit" to p.staffLimit, "newDeviceLimit" to p.deviceLimit,
-                                        "newValidUntil" to endTs, "demoActivationNumber" to activationCount, "deviceId" to deviceId,
-                                        "changedAt" to Timestamp.now(), "changedBy" to uid
-                                    )
-                                    val auditBatch = db.batch()
-                                    auditBatch.set(activationRef, activationData)
-                                    auditBatch.set(db.collection(LEADS_COLLECTION).document(), commonLead)
-                                    auditBatch.set(db.collection("licenseHistory").document(), historyData)
-                                    auditBatch.commit().addOnCompleteListener { auditTask ->
-                                        if (auditTask.isSuccessful) message = "Free demo activated successfully."
-                                        else message = "Free demo activated successfully. Some activity history could not be saved yet."
-                                        onActivated()
-                                    }
-                                }
+                            is DemoAlreadyUsedException -> {
+                                blockedByUsedDemo = true
+                                message = "This device has already been used for a demo. Kindly buy the license."
                             }
+                            else -> message = firestoreFriendlyError(ex)
                         }
+                        return@addOnCompleteListener
+                    }
+                    val core = coreTask.result!!
+                    val activationType = if (core.firstActivation) "FIRST_DEMO" else "RE_DEMO_AFTER_RESET"
+                    val activationRef = db.collection(DEMO_ACTIVATIONS_COLLECTION).document()
+                    val commonLead = mapOf(
+                        "leadType" to "DEMO_ACTIVATION", "source" to "DEMO_ACTIVATION", "activationId" to activationRef.id,
+                        "activationNumber" to core.activationNumber, "activationType" to activationType, "licenseId" to core.licenseId,
+                        "clientId" to core.clientId, "tenantId" to tenantId, "customerName" to customerName.trim(),
+                        "businessName" to businessName.trim(), "email" to mail, "phone" to phone.trim(), "deviceId" to deviceId,
+                        "status" to "NEW", "followUpDate" to null, "remark" to "", "createdAt" to FieldValue.serverTimestamp(),
+                        "createdByUid" to uid, "updatedAt" to FieldValue.serverTimestamp(), "updatedByUid" to uid
+                    )
+                    val activationData = mapOf(
+                        "licenseId" to core.licenseId, "clientId" to core.clientId, "tenantId" to tenantId,
+                        "customerName" to customerName.trim(), "businessName" to businessName.trim(), "customerEmail" to mail,
+                        "customerPhone" to phone.trim(), "deviceId" to deviceId, "activationNumber" to core.activationNumber,
+                        "activationType" to activationType, "validUntil" to core.validUntil, "staffLimit" to core.staffLimit,
+                        "deviceLimit" to core.deviceLimit, "modules" to core.modules, "activatedAt" to FieldValue.serverTimestamp(), "activatedBy" to uid
+                    )
+                    val historyData = mapOf(
+                        "licenseId" to core.licenseId, "clientId" to core.clientId, "tenantId" to tenantId, "customerEmail" to mail,
+                        "action" to if (core.firstActivation) "DEMO_ACTIVATED" else "DEMO_REACTIVATED_AFTER_RESET",
+                        "licenseType" to "DEMO", "newStaffLimit" to core.staffLimit, "newDeviceLimit" to core.deviceLimit,
+                        "newValidUntil" to core.validUntil, "demoActivationNumber" to core.activationNumber, "deviceId" to deviceId,
+                        "changedAt" to FieldValue.serverTimestamp(), "changedBy" to uid
+                    )
+                    val auditBatch = db.batch()
+                    auditBatch.set(activationRef, activationData)
+                    auditBatch.set(db.collection(LEADS_COLLECTION).document(), commonLead)
+                    auditBatch.set(db.collection("licenseHistory").document(), historyData)
+                    auditBatch.commit().addOnCompleteListener { auditTask ->
+                        message = if (auditTask.isSuccessful) "Free demo activated successfully." else "Free demo activated successfully. Some activity history could not be saved yet."
+                        onActivated()
                     }
                 }
             }
@@ -811,7 +815,6 @@ private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: (
     }
 }
 
-private class DemoAlreadyUsedException : Exception("Demo already used on this device/account. Kindly buy the license.")
 
 @Composable
 private fun DeveloperScreen(email: String, onSignOut: () -> Unit) {
@@ -1339,13 +1342,14 @@ private fun CustomerOnboardingScreen(user: FirebaseUser, onSignOut: () -> Unit) 
             if (!reloadTask.isSuccessful) { loading = false; message = friendlyAuthError(reloadTask.exception); return@addOnCompleteListener }
             if (authIsVerified(user).not()) { loading = false; message = "Please verify your email address first, then sign in again."; return@addOnCompleteListener }
             val email = user.email?.trim()?.lowercase(Locale.ROOT).orEmpty()
-            // Query only by customerEmail. Status/validity are verified locally so first-time
-            // paid onboarding does not depend on a Firestore composite index.
-            db.collection("licenses").whereEqualTo("customerEmail", email).limit(20).get().addOnCompleteListener { task ->
+            // Query is constrained by authenticated customer email and ACTIVE status; the repo
+            // also ships the corresponding Firestore index definition for deterministic deployment.
+            db.collection("licenses").whereEqualTo("customerEmail", email).whereEqualTo("status", "ACTIVE").limit(20).get().addOnCompleteListener { task ->
             if (!task.isSuccessful) { loading = false; message = firestoreFriendlyError(task.exception); return@addOnCompleteListener }
             val now = Timestamp.now()
             val doc = task.result?.documents?.firstOrNull { d ->
                 d.getString("status") == "ACTIVE" &&
+                    normalizedEmail(d.getString("customerEmail")) == email &&
                     (d.getTimestamp("validUntil")?.toDate()?.after(now.toDate()) == true)
             }
             if (doc == null) {
@@ -1551,7 +1555,11 @@ private fun SimpleRoleScreen(title: String, user: UserRecord, deviceId: String, 
 
 private fun getStableDeviceId(context: Context): String {
     val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)?.trim().orEmpty()
-    val stable = if (androidId.isNotBlank()) androidId else UUID.randomUUID().toString()
+    val prefs = context.getSharedPreferences("device_identity", Context.MODE_PRIVATE)
+    val fallback = prefs.getString("installation_id", null) ?: UUID.randomUUID().toString().also {
+        prefs.edit().putString("installation_id", it).apply()
+    }
+    val stable = if (androidId.isNotBlank()) androidId else fallback
     return "DEV-${stable.lowercase(Locale.ROOT)}"
 }
 
