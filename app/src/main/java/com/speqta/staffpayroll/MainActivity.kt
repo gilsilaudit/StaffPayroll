@@ -6,6 +6,7 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -286,6 +287,24 @@ private fun LoginScreen(auth: FirebaseAuth, onSignedIn: () -> Unit, onSignedUp: 
     var showSignUp by remember { mutableStateOf(false) }
     var showPaidActivation by remember { mutableStateOf(false) }
     var showDemo by remember { mutableStateOf(false) }
+    var demoPolicy by remember { mutableStateOf<DemoPolicy?>(null) }
+
+    LaunchedEffect(Unit) {
+        FirebaseFirestore.getInstance().collection("system").document(DEMO_POLICY_DOC).get().addOnCompleteListener { task ->
+            if (task.isSuccessful && task.result?.exists() == true) {
+                demoPolicy = demoPolicyFrom(task.result!!)
+            }
+        }
+    }
+
+    // Android system Back gesture/button: close the currently open authentication sub-screen first.
+    BackHandler(enabled = showSignUp || showPaidActivation || showDemo) {
+        when {
+            showSignUp -> showSignUp = false
+            showPaidActivation -> showPaidActivation = false
+            showDemo -> showDemo = false
+        }
+    }
 
     if (showSignUp) {
         SignUpScreen(auth, email, onBack = { showSignUp = false }, onSignedUp = onSignedUp)
@@ -331,7 +350,12 @@ private fun LoginScreen(auth: FirebaseAuth, onSignedIn: () -> Unit, onSignedUp: 
         Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = { showPaidActivation = true }, Modifier.fillMaxWidth(), enabled = !busy) { Text("Activate Purchased License") }
         Spacer(Modifier.height(8.dp))
-        Button(onClick = { showDemo = true }, Modifier.fillMaxWidth(), enabled = !busy) { Text("Start 3-Day Free Demo") }
+        Button(onClick = { showDemo = true }, Modifier.fillMaxWidth(), enabled = !busy) {
+            Text(demoPolicy?.let { "Start ${it.durationDays}-Day Free Demo" } ?: "Start Free Demo")
+        }
+        demoPolicy?.let {
+            Text("Current offer: ${it.durationDays} days • ${it.staffLimit} staff • ${it.deviceLimit} devices", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(
             onClick = {
@@ -354,6 +378,7 @@ private fun PaidCustomerActivationScreen(
     onBack: () -> Unit,
     onActivated: () -> Unit
 ) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var email by remember { mutableStateOf(initialEmail) }
     var password by remember { mutableStateOf("") }
@@ -372,33 +397,57 @@ private fun PaidCustomerActivationScreen(
             message = "Your Firebase account does not have a valid email address."
             return
         }
-        db.collection("licenses")
-            .whereEqualTo("customerEmail", mail)
-            .whereEqualTo("licenseType", "PAID")
-            .whereEqualTo("status", "ACTIVE")
-            .whereGreaterThanOrEqualTo("validUntil", Timestamp.now())
-            .limit(5)
+        // Look up the tenant by the registered email first. This avoids a collection
+        // query against all license documents and then reads the single linked license.
+        db.collection("tenants")
+            // Only one indexed equality is used here so customer activation does not
+            // depend on a manually-created composite Firestore index.
+            .whereEqualTo("primaryEmail", mail)
+            .limit(20)
             .get()
-            .addOnCompleteListener { task ->
-                if (!task.isSuccessful) {
+            .addOnCompleteListener { tenantTask ->
+                if (!tenantTask.isSuccessful) {
                     busy = false
-                    message = firestoreFriendlyError(task.exception)
+                    message = firestoreFriendlyError(tenantTask.exception)
                     return@addOnCompleteListener
                 }
-                val licDoc = task.result?.documents?.firstOrNull()
-                if (licDoc == null) {
+                val tenantDoc = tenantTask.result?.documents?.firstOrNull { doc ->
+                    doc.getString("status") == "ACTIVE"
+                        && doc.getString("accountType") == "PAID"
+                        && (doc.getString("ownershipStatus") ?: "UNASSIGNED") == "UNASSIGNED"
+                        && doc.getString("ownerUid").orEmpty().isBlank()
+                }
+                if (tenantDoc == null) {
                     busy = false
-                    message = "No active paid license was found for $mail. Please check the registered email or contact the License Team."
+                    message = "No unactivated paid license was found for $mail. Please check the registered email or contact the License Team."
                     return@addOnCompleteListener
                 }
-                val lic = licenseFrom(licDoc)
-                license = lic
-                if (lic.tenantId.isBlank()) {
+                val tenantId = tenantDoc.id
+                val licenseId = tenantDoc.getString("activeLicenseId").orEmpty()
+                if (licenseId.isBlank()) {
                     busy = false
-                    message = "The license record is incomplete. Please contact the License Team."
+                    message = "The customer license record is incomplete. Please contact the License Team."
                     return@addOnCompleteListener
                 }
-                val tenantRef = db.collection("tenants").document(lic.tenantId)
+                val tenantRef = db.collection("tenants").document(tenantId)
+                db.collection("licenses").document(licenseId).get().addOnCompleteListener { licenseTask ->
+                    if (!licenseTask.isSuccessful || licenseTask.result?.exists() != true) {
+                        busy = false
+                        message = firestoreFriendlyError(licenseTask.exception)
+                        return@addOnCompleteListener
+                    }
+                    val lic = licenseFrom(licenseTask.result!!)
+                    if (lic.licenseType != "PAID" || lic.status != "ACTIVE" || lic.tenantId != tenantId || lic.customerEmail.trim().lowercase(Locale.ROOT) != mail) {
+                        busy = false
+                        message = "The paid license record does not match this customer email. Please contact the License Team."
+                        return@addOnCompleteListener
+                    }
+                    if (lic.validUntil == null || lic.validUntil!! < Timestamp.now()) {
+                        busy = false
+                        message = "This paid license has expired. Please contact the License Team for renewal."
+                        return@addOnCompleteListener
+                    }
+                    license = lic
                 val userRef = db.collection("users").document(user.uid)
                 db.runTransaction { tx ->
                     val tenantSnap = tx.get(tenantRef)
@@ -443,13 +492,14 @@ private fun PaidCustomerActivationScreen(
                         "updatedAt" to now
                     ))
                     true
-                }.addOnCompleteListener { claimTask ->
-                    busy = false
-                    if (claimTask.isSuccessful) {
-                        message = "Paid license activated successfully."
-                        onActivated()
-                    } else {
-                        message = claimTask.exception?.message ?: "Unable to activate the paid license."
+                    }.addOnCompleteListener { claimTask ->
+                        busy = false
+                        if (claimTask.isSuccessful) {
+                            message = "Paid license activated successfully."
+                            onActivated()
+                        } else {
+                            message = claimTask.exception?.message ?: "Unable to activate the paid license."
+                        }
                     }
                 }
             }
@@ -576,6 +626,7 @@ private fun PaidCustomerActivationScreen(
 
 @Composable
 private fun SignUpScreen(auth: FirebaseAuth, initialEmail: String, onBack: () -> Unit, onSignedUp: () -> Unit) {
+    BackHandler { onBack() }
     var email by remember { mutableStateOf(initialEmail) }
     var password by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
@@ -626,6 +677,7 @@ private fun SignUpScreen(auth: FirebaseAuth, initialEmail: String, onBack: () ->
 
 @Composable
 private fun DemoSignupScreen(auth: FirebaseAuth, initialEmail: String, onBack: () -> Unit, onActivated: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var email by remember { mutableStateOf(initialEmail) }
     var password by remember { mutableStateOf("") }
@@ -883,6 +935,17 @@ private fun DeveloperScreen(email: String, onSignOut: () -> Unit) {
     var showDemoReset by remember { mutableStateOf(false) }
     var showDemoActivations by remember { mutableStateOf(false) }
     var showLeadPolicy by remember { mutableStateOf(false) }
+    BackHandler(enabled = showTenants || showLicenses || showDemoPolicy || showDemoLeads || showDemoReset || showDemoActivations || showLeadPolicy) {
+        when {
+            showTenants -> showTenants = false
+            showLicenses -> showLicenses = false
+            showDemoPolicy -> showDemoPolicy = false
+            showDemoLeads -> showDemoLeads = false
+            showDemoReset -> showDemoReset = false
+            showDemoActivations -> showDemoActivations = false
+            showLeadPolicy -> showLeadPolicy = false
+        }
+    }
     val db = remember { FirebaseFirestore.getInstance() }
     LaunchedEffect(Unit) {
         val ref = db.collection("system").document(DEMO_POLICY_DOC)
@@ -953,6 +1016,7 @@ private fun DeveloperScreen(email: String, onSignOut: () -> Unit) {
 
 @Composable
 private fun TenantAndLicenseCreateScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var clientName by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
@@ -1053,6 +1117,7 @@ private fun TenantAndLicenseCreateScreen(onBack: () -> Unit, onSignOut: () -> Un
 
 @Composable
 private fun DemoActivationsScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var items by remember { mutableStateOf<List<DocumentSnapshot>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
@@ -1111,6 +1176,7 @@ private fun LeadStatusDropdown(current: String, statuses: List<String>, enabled:
 
 @Composable
 private fun LeadManagementScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var leads by remember { mutableStateOf<List<DocumentSnapshot>>(emptyList()) }
     var statuses by remember { mutableStateOf(defaultLeadStatuses()) }
@@ -1191,6 +1257,7 @@ private fun DemoLeadsScreen(onBack: () -> Unit, onSignOut: () -> Unit) = LeadMan
 
 @Composable
 private fun DemoResetScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var deviceId by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
@@ -1223,6 +1290,7 @@ private fun DemoResetScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
 
 @Composable
 private fun LeadPolicyScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var statusesText by remember { mutableStateOf(defaultLeadStatuses().joinToString(", ")) }
     var loading by remember { mutableStateOf(true) }
@@ -1266,6 +1334,7 @@ private fun LeadPolicyScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
 
 @Composable
 private fun DemoPolicyScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var durationDays by remember { mutableStateOf(DEFAULT_DEMO_DAYS.toString()) }; var staffLimit by remember { mutableStateOf(DEFAULT_DEMO_STAFF_LIMIT.toString()) }; var deviceLimit by remember { mutableStateOf(DEFAULT_DEMO_DEVICE_LIMIT.toString()) }
     var attendance by remember { mutableStateOf(true) }; var leave by remember { mutableStateOf(true) }; var salary by remember { mutableStateOf(true) }; var payroll by remember { mutableStateOf(true) }; var reports by remember { mutableStateOf(true) }
@@ -1284,6 +1353,7 @@ private fun DemoPolicyScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
 
 @Composable
 private fun LicenseManagementScreen(onBack: () -> Unit, onSignOut: () -> Unit) {
+    BackHandler { onBack() }
     val db = remember { FirebaseFirestore.getInstance() }
     var licenses by remember { mutableStateOf<List<LicenseRecord>>(emptyList()) }
     var selected by remember { mutableStateOf<LicenseRecord?>(null) }
@@ -1377,9 +1447,12 @@ private fun CustomerOnboardingScreen(user: FirebaseUser, onSignOut: () -> Unit) 
             if (!reloadTask.isSuccessful) { loading = false; message = friendlyAuthError(reloadTask.exception); return@addOnCompleteListener }
             if (authIsVerified(user).not()) { loading = false; message = "Please verify your email address first, then sign in again."; return@addOnCompleteListener }
             val email = user.email?.trim()?.lowercase(Locale.ROOT).orEmpty()
-            db.collection("licenses").whereEqualTo("customerEmail", email).whereEqualTo("status", "ACTIVE").whereGreaterThanOrEqualTo("validUntil", Timestamp.now()).limit(1).get().addOnCompleteListener { task ->
+            db.collection("licenses").whereEqualTo("customerEmail", email).limit(20).get().addOnCompleteListener { task ->
             if (!task.isSuccessful) { loading = false; message = firestoreFriendlyError(task.exception); return@addOnCompleteListener }
-            val doc = task.result?.documents?.firstOrNull()
+            val doc = task.result?.documents?.firstOrNull { candidate ->
+                candidate.getString("status") == "ACTIVE"
+                    && ((candidate.getTimestamp("validUntil")?.toDate()?.time ?: 0L) >= System.currentTimeMillis())
+            }
             if (doc == null) { loading = false; message = "No active license is registered for this email. Please contact the License Team."; return@addOnCompleteListener }
             val lic = licenseFrom(doc); license = lic
             db.collection("tenants").document(lic.tenantId).get().addOnCompleteListener { tenantTask ->

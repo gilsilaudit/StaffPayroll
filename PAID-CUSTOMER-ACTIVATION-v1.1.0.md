@@ -1,4 +1,4 @@
-# Paid Customer Activation — v1.1.0
+# Paid Customer Activation — v1.1.1
 
 ## Final customer flow
 1. Developer/Sales issues a PAID license against the customer's registered email.
@@ -20,5 +20,13 @@
 - Existing demo flow remains separate and unchanged.
 
 ## Version
-- versionCode: 16
-- versionName: 1.1.0
+- versionCode: 17
+- versionName: 1.1.1
+
+
+## v1.1.1 Fixes
+
+- Paid activation now discovers the unactivated paid tenant by the registered customer email, then reads the single linked license document. This avoids the previous license-collection query path that could return a Firestore permission error.
+- Login screen now reads `/system/demoPolicy` and displays the live Developer-configured demo duration instead of a hard-coded 3-day label.
+- Android system Back gesture/button is restored for authentication sub-screens and Developer child screens.
+- Customer license/tenant reads now require verified email when performed by the customer.
